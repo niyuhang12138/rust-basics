@@ -1,0 +1,15 @@
+[package]
+name = "_03_httpie"
+version = "0.1.0"
+edition = "2021"
+authors = ["Marcus Nuhn <marcus.nuhn@gmail.com>"]
+
+[dependencies]
+anyhow = "1.0.93"
+clap = { version = "4.5.21", features = ["derive"] }
+colored = "2.1.0"
+jsonxf = "1.1.1"
+mime = "0.3.17"
+reqwest = { version = "0.12.9", features = ["json"] }
+tokio = { version = "1.41.1", features = ["full"] }
+url = "2.5.4"

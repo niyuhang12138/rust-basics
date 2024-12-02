@@ -143,3 +143,15 @@
 //         Event::Message((_, _, msg)) => ..,
 //     }
 // }
+
+fn main() {
+    let mut v = vec![1, 2, 3, 4];
+    let mut_v = &mut v;
+    foo(mut_v);
+    println!("{:?}", mut_v.as_ptr())
+}
+
+fn foo(v: &mut Vec<i32>) {
+    v.push(5);
+    println!("{:?}", v.as_mut_ptr())
+}

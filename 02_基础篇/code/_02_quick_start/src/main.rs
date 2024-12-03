@@ -147,11 +147,14 @@
 fn main() {
     let mut v = vec![1, 2, 3, 4];
     let mut_v = &mut v;
-    foo(mut_v);
-    println!("{:?}", mut_v.as_ptr())
+    // foo(mut_v);
+    // println!("{:?}", mut_v.as_ptr())
+
+    let mut_v1 = mut_v;
+    // println!("{:?}", mut_v)
 }
 
-fn foo(v: &mut Vec<i32>) {
-    v.push(5);
-    println!("{:?}", v.as_mut_ptr())
-}
+// fn foo(v: &mut Vec<i32>) {
+//     v.push(5);
+//     println!("{:?}", v.as_mut_ptr())
+// }

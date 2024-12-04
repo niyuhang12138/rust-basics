@@ -41,8 +41,30 @@
 //     show_size!(E);
 // }
 
-use std::net::SocketAddr;
-fn main() {
-    let addr = "127.0.0.1:8080".parse::<SocketAddr>().unwrap();
-    println!("addr: {:?}, port: {:?}", addr.ip(), addr.port());
-}
+// use std::net::SocketAddr;
+// fn main() {
+//     let addr = "127.0.0.1:8080".parse::<SocketAddr>().unwrap();
+//     println!("addr: {:?}, port: {:?}", addr.ip(), addr.port());
+// }
+
+// use std::io::{BufWriter, Write};
+// use std::net::TcpStream;
+// #[derive(Debug)]
+// struct MyWriter<W> {
+//     writer: W,
+// }
+// impl<W: Write> MyWriter<W> {
+//     pub fn new(addr: &str) -> Self {
+//         let stream: TcpStream = TcpStream::connect(addr).unwrap();
+//         Self {
+//             writer: BufWriter::new(stream),
+//         }
+//     }
+//     pub fn write(&mut self, buf: &str) -> std::io::Result<()> {
+//         self.writer.write_all(buf.as_bytes())
+//     }
+// }
+// fn main() {
+//     let writer: MyWriter<_> = MyWriter::new("127.0.0.1:8080");
+//     writer.write("hello world!");
+// }

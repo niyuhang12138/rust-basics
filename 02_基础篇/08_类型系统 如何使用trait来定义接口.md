@@ -645,3 +645,130 @@ triat作为对不同数据结构的一种抽象, 它可以让我们在开发时,
 
 因为Rust的trait在强大, 也只是一把瑞士军刀, 能让它充分发挥作用的是持有它的那个人
 
+## 延伸阅读
+
+使用trait有两个注意规则:
+
+- 在定义和使用trait的时候, 我们需要遵循孤儿规则
+  - trait和实现trait的数据类型, 至少有一个是当前create中定义的, 也就是说, 你不能为第三方类型实现的第三方trait, 当你尝试这么做时, Rust编译器会报错, 我们可以使用newtype来解决这个问题
+
+## 思考题
+
+1. 对于`Add<Rhs> trait`, 如果我们不使用泛型, 把Rhs作为Add trait的关联类型, 可以么? 为什么?
+
+   > 不可以, 因为trait只能被具体的类型实现一次, 如何我们向实现不同类型的相加就只能使用泛型
+
+2. 如下代码能编译通过吗, 为什么?
+
+   ```rust
+   use std::{fs::File, io::Write};
+   fn main() {
+       let mut f = File::create("/tmp/test_write_trait").unwrap();
+       let w: &mut dyn Write = &mut f;
+       w.write_all(b"hello ").unwrap();
+       let w1 = w.by_ref();
+       w1.write_all(b"world").unwrap();
+   }
+   ```
+
+   > 不可以, 返回类型中的 Self 需要是Sized, 而 dyn Write 不是Sized
+
+3. 在Complex的例子中, `c1 + c2`到导致所有权移动, 所以我们还是用了`&c1 + &c2`来避免这种行为, 初次之外, 你还什么方法能够让`c1 + c2`执行完杭州继续使用吗? 如何修改Complex的代码实现这个功能
+
+   > 限制实现接口之前先实现`Copy + Clone`
+
+4. 学有余力的同学可以挑战一下，Iterator 是 Rust 下的迭代器的 trait，你可以阅读
+
+   Iterator 的文档获得更多的信息。它有一个关联类型 Item 和一个方法 next() 需要实现，
+
+   每次调用 next，如果迭代器中还能得到一个值，则返回 Some(Item)，否则返回 None。
+
+   请阅读如下代码，想想看如何实现 SentenceIter 这个结构的迭代器？
+
+   ```rust
+   struct SentenceIter<'a> {
+       s: &'a mut &'a str,
+       delimiter: char,
+   }
+   impl<'a> SentenceIter<'a> {
+       pub fn new(s: &'a mut &'a str, delimiter: char) -> Self {
+           Self { s, delimiter }
+       }
+   }
+   impl<'a> Iterator for SentenceIter<'a> {
+       type Item; // 想想 Item 应该是什么类型？
+       fn next(&mut self) -> Option<Self::Item> {
+           // 如何实现 next 方法让下面的测试通过？
+           todo!()
+       }
+   }
+   #[test]
+   fn it_works() {
+       let mut s = "This is the 1st sentence. This is the 2nd sentence.";
+       let mut iter = SentenceIter::new(&mut s, '.');
+       assert_eq!(iter.next(), Some("This is the 1st sentence."));
+       assert_eq!(iter.next(), Some("This is the 2nd sentence."));
+       assert_eq!(iter.next(), None);
+   }
+   fn main() {
+       let mut s = "a。 b。 c";
+       let sentences: Vec<_> = SentenceIter::new(&mut s, '。').collect();
+       println!("sentences: {:?}", sentences);
+   }
+   ```
+
+   ```rust
+   struct SentenceIter<'a> {
+       s: &'a mut &'a str,
+       delimiter: char,
+   }
+   impl<'a> SentenceIter<'a> {
+       pub fn new(s: &'a mut &'a str, delimiter: char) -> Self {
+           Self { s, delimiter }
+       }
+   }
+   impl<'a> Iterator for SentenceIter<'a> {
+       type Item = &'a str; // 想想 Item 应该是什么类型？
+       fn next(&mut self) -> Option<Self::Item> {
+           // 如何实现 next 方法让下面的测试通过？
+           if self.s.is_empty() {
+               return None;
+           }
+   
+           match self.s.find(self.delimiter) {
+               Some(pos) => {
+                   let len = self.delimiter.len_utf8();
+                   let s = &self.s[..pos + len];
+                   let suffix = &self.s[pos + len..];
+                   *self.s = suffix;
+                   Some(s.trim())
+               }
+               None => {
+                   let s = (*self.s).trim();
+                   *self.s = "";
+                   if s.len() == 0 {
+                       return None;
+                   } else {
+                       Some(s)
+                   }
+               }
+           }
+       }
+   }
+   #[test]
+   fn it_works() {
+       let mut s = "This is the 1st sentence. This is the 2nd sentence.";
+       let mut iter = SentenceIter::new(&mut s, '.');
+       assert_eq!(iter.next(), Some("This is the 1st sentence."));
+       assert_eq!(iter.next(), Some("This is the 2nd sentence."));
+       assert_eq!(iter.next(), None);
+   }
+   fn main() {
+       let mut s = "a。 b。 c";
+       let sentences: Vec<_> = SentenceIter::new(&mut s, '。').collect();
+       println!("sentences: {:?}", sentences);
+   }
+   ```
+
+   
+

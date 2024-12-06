@@ -104,31 +104,118 @@
 //     assert_eq!(String::from_iter(s2), s3);
 // }
 
-use std::ops::Deref;
+// use std::ops::Deref;
+
+// fn main() {
+//     let mut v1 = vec![1, 2, 3, 4];
+//     v1.push(5);
+//     println!("cap should be 8: {}", v1.capacity());
+
+//     // 从Vec<T>转换成Box<[T]>, 此时会丢弃多余的capacity
+//     let b1 = v1.into_boxed_slice();
+//     let mut b2 = b1.clone();
+//     let v2 = b1.into_vec();
+//     println!("cap should be exactly 5: {}", v2.capacity());
+//     assert!(b2.deref() == v2);
+
+//     // Box<[T]>可以更改其内部数据, 但无法push
+//     b2[0] = 2;
+//     println!("b2: {:?}", b2);
+
+//     // 注意Box<[T]>和Box<[T;n]>并不相同
+//     let b3 = Box::new([2, 2, 3, 4, 5]);
+//     println!("b3: {:?}", b3);
+
+//     // b2和b3相等, 但b3.deref()无法和v2进行比较
+//     assert!(b2 == b3);
+//     let a = b3.deref();
+//     let b = v2.deref();
+//     // assert!(b3.deref() == v2);
+// }
+
+// use core::slice;
+// use std::{fmt, ops::Deref};
+
+// fn main() {
+//     let v = vec![1, 2, 3, 4];
+//     // Vec实现了Deref, &Vec<T>会自动解引用为&[T], 符合接口定义
+//     print_slice(&v);
+
+//     // 直接是&[T], 符合接口定义
+//     print_slice(&v[..]);
+
+//     // &Vec<T>支持AsRef<T>
+//     print_slice1(&v);
+
+//     // &[T]支持AsRef<T>
+//     print_slice1(&v[..]);
+
+//     // Vec也支持AsRef<T>
+//     print_slice1(v);
+
+//     let arr = [1, 2, 3, 4];
+//     // 数组虽然没有实现Deref. 但它的解引用就是&[T]
+//     print_slice(&arr);
+//     print_slice(&arr[..]);
+//     print_slice1(&arr);
+//     print_slice1(&arr[..]);
+//     print_slice1(arr);
+// }
+
+// fn print_slice<T: fmt::Debug>(s: &[T]) {
+//     println!("{:?}", s);
+// }
+
+// fn print_slice1<T, U>(s: T)
+// where
+//     T: AsRef<[U]>,
+//     U: fmt::Debug,
+// {
+//     println!("{:?}", s.as_ref());
+// }
+
+// fn print_slice1<T, U>(s: T)
+// where
+//     T: AsRef<U>,
+//     U: fmt::Debug,
+// {
+//     println!("{:?}", s.as_ref());
+// }
+
+// IteratorExt继承Iterator, 这样就可以地哦啊用Iterator的全部功能
+pub trait IteratorExt: Iterator {
+    fn window_count(self, count: u32) -> WindowCount<Self>
+    where
+        Self: Sized,
+    {
+        WindowCount { iter: self, count }
+    }
+}
+
+// 这句很重要, 它让所有实现了Iterator的T都自动实现了IteratorExt
+impl<T: ?Sized> IteratorExt for T where T: Iterator {}
+
+pub struct WindowCount<I> {
+    pub(crate) iter: I,
+    count: u32,
+}
+
+impl<I: Iterator> Iterator for WindowCount<I> {
+    type Item = Vec<I::Item>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let data = (0..self.count)
+            .filter_map(|_| self.iter.next())
+            .collect::<Vec<_>>();
+        if data.is_empty() {
+            None
+        } else {
+            Some(data)
+        }
+    }
+}
 
 fn main() {
-    let mut v1 = vec![1, 2, 3, 4];
-    v1.push(5);
-    println!("cap should be 8: {}", v1.capacity());
-
-    // 从Vec<T>转换成Box<[T]>, 此时会丢弃多余的capacity
-    let b1 = v1.into_boxed_slice();
-    let mut b2 = b1.clone();
-    let v2 = b1.into_vec();
-    println!("cap should be exactly 5: {}", v2.capacity());
-    assert!(b2.deref() == v2);
-
-    // Box<[T]>可以更改其内部数据, 但无法push
-    b2[0] = 2;
-    println!("b2: {:?}", b2);
-
-    // 注意Box<[T]>和Box<[T;n]>并不相同
-    let b3 = Box::new([2, 2, 3, 4, 5]);
-    println!("b3: {:?}", b3);
-
-    // b2和b3相等, 但b3.deref()无法和v2进行比较
-    assert!(b2 == b3);
-    let a = b3.deref();
-    let b = v2.deref();
-    // assert!(b3.deref() == v2);
+    let data = vec![1, 2, 3, 4, 5];
+    let result = data.iter().window_count(2).collect::<Vec<_>>();
+    println!("{:?}", result);
 }

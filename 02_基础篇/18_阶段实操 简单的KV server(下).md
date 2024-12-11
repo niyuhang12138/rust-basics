@@ -416,3 +416,411 @@ mod momory;
 pub use memory::MemTable;
 ```
 
+## 实现并验证CommandService trait
+
+Storage trait我们就算基本验证通过了, 现在再来验证CommandService
+
+我们创建`src/service`目录, 以及创建`src/service/mod.rs`和`src/service/command_service.rs`文件, 并在`src/service/mod.rs`写入:
+
+```rust
+mod command_service;
+
+use crate::{CommandResponse, Storage};
+pub trait CommandService {
+    fn execute(self, store: impl Storage) -> CommandResponse;
+}
+```
+
+不要忘记在src/lib.rs中加入service
+
+然后在`src/service/command_service.rs`中, 我们可以先写一些测试, 为了简单起见, 就列HSET, HGET. HGETALL三个命令:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::command_request::RequestData;
+
+    #[test]
+    fn hset_should_work() {
+        let store = MemTable::new();
+        let cmd = CommandRequest::new_hset("t1", "hello", "world".into());
+        let res = dispatch(cmd.clone(), &store);
+        assert_res_ok(res, &[10.into()], &[]);
+    }
+
+    #[test]
+    fn hget_should_work() {
+        let store = MemTable::new();
+        let cmd = CommandRequest::new_hset("score", "u1", 10.into());
+        dispatch(cmd, &store);
+        let cmd = CommandRequest::new_hget("score", "u1");
+        let res = dispatch(cmd, &store);
+        assert_res_ok(res, &[10.into()], &[]);
+    }
+    #[test]
+    fn hget_with_non_exist_key_should_return_404() {
+        let store = MemTable::new();
+        let cmd = CommandRequest::new_hget("score", "u1");
+        let res = dispatch(cmd, &store);
+        assert_res_error(res, 404, "Not found");
+    }
+
+    fn dispatch(cmd: CommandRequest, store: &impl Storage) -> CommandResponse {
+        match cmd.request_data.unwrap() {
+            RequestData::Hset(v) => v.execute(store),
+            _ => todo!(),
+        }
+    }
+
+    // 测试成功返回的结果
+    fn assert_res_ok(mut res: CommandResponse, values: &[Value], pairs: &[Kvpair]) {
+        res.pairs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(res.status, 200);
+        assert_eq!(res.message, "");
+        assert_eq!(res.values, values);
+        assert_eq!(res.pairs, pairs);
+    }
+
+    // 测试失败返回的结果
+    fn assert_res_error(res: CommandResponse, code: u32, msg: &str) {
+        assert_eq!(res.status, code);
+        assert!(res.message.contains(msg));
+        assert_eq!(res.values, &[]);
+        assert_eq!(res.pairs, &[]);
+    }
+}
+```
+
+这些测试的作用就是验证产品需求, 比如:
+
+- HSET成功返回上一次的值(这和Redis略有不同, Redis返回表示多少受影响的一个整数)
+- HGET返回Value
+- HGETALL返回一组无需的Kvpair
+
+目前这些测试是无法通过的, 因为里面使用了一些未定义的方法, 比如`10.into()`: 想把整数10转换成一个Value, `CommandRequest::new_hgetall("score")`: 想生成一个HGETALL命令
+
+为什么要这么写? 因为如果是CommandService接口的使用者, 自然希望使用这个接口的时候, 地哦啊用感觉非常简单明了
+
+如果接口期待一个Value, 但在上下文中拿到的是10, "hello"这样的值, 那我们作为设计者就要考虑为Value实现`From<T>`. 这样调用的时候最方便, 同样的, 对于生成CommandRequest这个数据结构, 也可以添加一些辅助函数, 来让调用者更清晰
+
+到现在为止我们已经写了两轮测试了, 相信你对测试代码的作用有大概的理解, 我们来总结一下:
+
+1. 验证并帮助接口迭代
+2. 验证产品需求
+3. 通过使用核心逻辑, 帮助我们更好的思考外围逻辑并反推其实现
+
+前两点式基本的, 也是很多人对TDD的理解, 其实还有更重要的是第三点, 除了前面的辅助函数之外, 我们在测试代码中, 还看到了dispatch函数, 它目前用来辅助测试, 但紧接着你会发现, 这样的辅助函数, 可以合并到核心代码中, 这才是测试驱动开发的实质
+
+根据测试, 我们需要再`src/pb/mod.rs`中添加相关的外围逻辑, 首先是CommandRequest的一些方法, 之前写了new_hset, 现在再加入new_hget和new_hgetall:
+
+```rust
+impl CommandRequest {
+    // 创建HSET命令
+    pub fn new_hset(table: impl Into<String>, key: impl Into<String>, value: Value) -> Self {
+        Self {
+            request_data: Some(RequestData::Hset(Hset {
+                table: table.into(),
+                pair: Some(Kvpair::new(key, value)),
+            })),
+        }
+    }
+
+    // 创建HGET命令
+    pub fn new_hget(table: impl Into<String>, key: impl Into<String>) -> Self {
+        Self {
+            request_data: Some(RequestData::Hget(Hget {
+                table: table.into(),
+                key: key.into(),
+            })),
+        }
+    }
+
+    // 创建HGETALL命令
+    pub fn new_hgetall(table: impl Into<String>, key: impl Into<String>) -> Self {
+        Self {
+            request_data: Some(RequestData::Hgetall(Hgetall {
+                table: table.into(),
+            })),
+        }
+    }
+}
+```
+
+然后对value的`From<i64>`的实现:
+
+```rust
+/// 从 i64转换成 Value
+impl From<i64> for Value {
+    fn from(i: i64) -> Self {
+        Self {
+            value: Some(value::Value::Integer(i)),
+        }
+    }
+}
+```
+
+测试代码目前就可以编译通过了, 然后测试显然会失败, 因为还没有做具体的实现, 我们在`src/service/command_service.rs`下添加trait的实现代码:
+
+```rust
+impl CommandService for Hget {
+    fn execute(self, store: &impl Storage) -> CommandResponse {
+        match store.get(&self.table, &self.key) {
+            Ok(Some(v)) => v.into(),
+            Ok(None) => KvError::NotFound(self.table, self.key).into(),
+            Err(e) => e.into(),
+        }
+    }
+}
+
+impl CommandService for Hgetall {
+    fn execute(self, store: &impl Storage) -> CommandResponse {
+        match store.get_all(&self.table) {
+            Ok(v) => v.into(),
+            Err(e) => e.into(),
+        }
+    }
+}
+
+impl CommandService for Hset {
+    fn execute(self, store: &impl Storage) -> CommandResponse {
+        match self.pair {
+            Some(v) => match store.set(&self.table, v.key, v.value.unwrap_or_default()) {
+                Ok(Some(v)) => v.into(),
+                Ok(None) => Value::default().into(),
+                Err(e) => e.into(),
+            },
+            None => Value::default().into(),
+        }
+    }
+}
+```
+
+这自然会引发更多的编译错误, 因为我们很多地方都是用了into方法, 却没有实现相应的转化, 比如Value到CommandResponse的转换, KvError到CommandResponse的转换, `Vec<Kvpair>`到CommandResponse的转换等等
+
+所以在`src/pb/mod.rs`里继续补上相应的外围逻辑:
+
+```rust
+/// 从Value转换成CommandResponse
+impl From<Value> for CommandResponse {
+    fn from(value: Value) -> Self {
+        Self {
+            status: StatusCode::OK.as_u16() as _,
+            values: vec![value],
+            ..Default::default()
+        }
+    }
+}
+
+/// 从Vec<KvPair>转换成CommandResponse
+impl From<Vec<Kvpair>> for CommandResponse {
+    fn from(value: Vec<Kvpair>) -> Self {
+        Self {
+            status: StatusCode::OK.as_u16() as _,
+            pairs: value,
+            ..Default::default()
+        }
+    }
+}
+
+/// 从KvError转换成CommandResponse
+impl From<KvError> for CommandResponse {
+    fn from(value: KvError) -> Self {
+        let mut result = Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR.as_u16() as _,
+            message: value.to_string(),
+            values: vec![],
+            pairs: vec![],
+        };
+
+        match value {
+            KvError::NotFound(_, _) => result.status = StatusCode::NOT_FOUND.as_u16() as _,
+            KvError::InvalidCommand(_) => result.status = StatusCode::BAD_REQUEST.as_u16() as _,
+            _ => {}
+        };
+
+        result
+    }
+}
+```
+
+从前面写接口到这里具体实现, 不知道你是否感受到了这样的一种模式: 在Rust下, 但凡出现两个数据结构的转换, 你都可以先以表示出来, 之后再去补`From<T>`的实现, 如果相互转换的数据都不是你定义的数据结构, 那么你需要把其中之一用struct包裹一下, 来绕过之前提到的孤儿规则
+
+## 最后拼图: Service结构的实现
+
+所有的接口, 包括客户端 / 服务器的协议接口, Storage trait和CommandService trait都验证好了, 接下来就是考虑如何用一个数据结构把所有的这些东西串联起来
+
+依旧从使用者的角度来看如何调用它, 为此, 我们在`src/service/mod.rs`里添加如下的测试代码:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{MemTable, Value};
+    use std::thread;
+
+    #[test]
+    fn service_should_works() {
+        // 我们需要一个 service 结构至少包含 Storage
+        let service = Service::new(MemTable::default());
+
+        // service 可以运行在多线程环境下，它的 clone 应该是轻量级的
+        let cloned = service.clone();
+
+        // 创建一个线程，在 table t1 中写入 k1, v1
+        let handle = thread::spawn(move || {
+            let res = cloned.execute(CommandRequest::new_hset("t1", "k1", "v1".into()));
+            assert_res_ok(res, &[Value::default()], &[]);
+        });
+        handle.join().unwrap();
+
+        // 在当前线程下读取 table t1 的 k1，应该返回 v1
+        let res = service.execute(CommandRequest::new_hget("t1", "k1"));
+        assert_res_ok(res, &["v1".into()], &[]);
+    }
+}
+
+#[cfg(test)]
+use crate::{Kvpair, Value};
+
+// 测试成功返回的结果
+#[cfg(test)]
+pub fn assert_res_ok(mut res: CommandResponse, values: &[Value], pairs: &[Kvpair]) {
+    res.pairs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(res.status, 200);
+    assert_eq!(res.message, "");
+    assert_eq!(res.values, values);
+    assert_eq!(res.pairs, pairs);
+}
+
+// 测试失败返回的结果
+#[cfg(test)]
+pub fn assert_res_error(res: CommandResponse, code: u32, msg: &str) {
+    assert_eq!(res.status, code);
+    assert!(res.message.contains(msg));
+    assert_eq!(res.values, &[]);
+    assert_eq!(res.pairs, &[]);
+}
+```
+
+注意这里的assert_res_ok和assert_res_error是从`src/service/command_service.rs`中挪过来的, 在开发过程中, 不光产品代码需要不断重构, 测试代码也需要重构来贯彻DRY思想
+
+我们见过很多生产环境下的代码, 产品功能部分还说得过去, 但测试代码就很垃圾, 这样非常不好
+
+测试代码的质量也要和产品代码的质量同等等级, 好的开发者写的测试代码可读性也是非常强的, 你可以对比上面写的三段测试代码多多感受
+
+在撰写测试代码的时候, 我们要特别注意: 测试代码要围绕着系统稳定的部分, 也就是接口, 来测试, 而尽可能的少测试实现
+
+因为产品代码和测试代码, 两者总需要一个相对稳定的, 既然产品代码会不断的根据需求变动, 测试代码就必须要稳定一些
+
+那什么样的测试代码算是稳定呢? 测试接口的代码是稳定的, 只要接口不变, 无论具体实现如何变化, 哪怕今天引入了一个新的算法, 明天重写实现, 测试代码依旧能够凛然不动
+
+在这段测试代码中, 已经敲定了Service这个数据结构的使用蓝图, 它可以跨线程, 可以调用execute来执行某个CommandRequest命令, 返回CommandResponse
+
+根据这些想法, 我们在`src/service/mod.rs`里添加Service的声明和实现:
+
+```rust
+/// Service数据结构
+pub struct Service<Store = MemTable> {
+    inner: Arc<ServiceInner<Store>>,
+}
+
+/// Service内部数据结构
+pub struct ServiceInner<Store> {
+    store: Store,
+}
+
+impl<Store: Storage> Service<Store> {
+    pub fn new(store: Store) -> Self {
+        Self {
+            inner: Arc::new(ServiceInner { store }),
+        }
+    }
+
+    pub fn execute(&self, cmd: CommandRequest) -> CommandResponse {
+        debug!("Got request: {:?}", cmd);
+        // TODO: 发送on_receiver
+        let res = dispatch(cmd, &self.inner.store);
+        debug!("Executed response: {:?}", res);
+        // TODO: 发送on_executed事件
+
+        res
+    }
+}
+
+// Request中得到Response, 目前处理HGET / HGETALL / HSET
+pub fn dispatch(cmd: CommandRequest, store: &impl Storage) -> CommandResponse {
+    match cmd.request_data {
+        Some(RequestData::Hget(param)) => param.execute(store),
+        Some(RequestData::Hgetall(param)) => param.execute(store),
+        Some(RequestData::Hset(param)) => param.execute(store),
+        None => KvError::InvalidCommand("Request has no data".into()).into(),
+        _ => KvError::Internal("Not implemented".into()).into(),
+    }
+}
+```
+
+这段代码有地方值得注意:
+
+1. 首先Service结构内部有一个ServiceInner存放实际的数据结构, Service只是用Arc包裹了ServiceInner, 这也是Rust下的一个历, 把需要再多线程下clone的主体和其内部结构分开, 这样代码逻辑更加清晰
+2. execute方法目前就是调用了dispatch, 但它未来潜在可以做一些事件分发, 这样处理体现了SRP原则
+3. dispatch其实就是把测试代码的dispatch逻辑移动过来改动了一下
+
+再一次, 我们重构了测试代码, 把它的辅助函数变成了产品代码的一部分
+
+## 新的server
+
+现在的处理逻辑都已经完成了, 可以写个新的example测试服务器代码
+
+把之前的`examples/dummy_server.rs`复制一份, 成为`examples/server.rs`, 然后引入Service
+
+```rust
+use anyhow::Result;
+use async_prost::AsyncProstStream;
+use futures::prelude::*;
+use kv_server::{CommandRequest, CommandResponse, MemTable, Service};
+use tokio::net::TcpListener;
+use tracing::info;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
+    // 初始化servicer
+    let service = Service::new(MemTable::new());
+
+    let addr = "127.0.0.1:9527";
+    let listener = TcpListener::bind(addr).await?;
+    info!("Start listening on {addr}");
+    loop {
+        let (stream, addr) = listener.accept().await?;
+        info!("Client {:?} connected", addr);
+        // 复制一份service
+        let svc = service.clone();
+        tokio::spawn(async move {
+            let mut stream =
+                AsyncProstStream::<_, CommandRequest, CommandResponse, _>::from(stream).for_async();
+            while let Some(Ok(cmd)) = stream.next().await {
+                let res = svc.execute(cmd);
+                stream.send(res).await.unwrap();
+            }
+            info!("Client {:?} disconnected", addr);
+        });
+    }
+}
+```
+
+完成之后, 打开一个命令行窗口, 运行: `RUST_LOG=info cargo run --example server --quiet`, 然后在另外一个命令行窗口运行: `RUST_LO=info cargo run --example client --quiet`, 此时服务器和客户端都收到了彼此的请求和响应, 并且处理正常
+
+我们的KV server第一版的基本功能就完工了, 当然目前还只能处理三个命令, 剩下六个需要你自己完成
+
+## 小结
+
+KV Server并不是一个很难的项目, 但想要把它写好, 并不简单, 如果你跟着讲解一步步走下来, 可能感受到一个有潜在生产环境质量的Rust项目应该如何开发, 在这上下两讲内容中, 有两点我们一定要认真领会
+
+第一点: 你要对需求有一个清晰的把握, 找出其中不稳定的部分和比较稳定的部分, 在KV server中, 不稳定的部分是对各种新的命令的支持, 以及对不同storage的支持, 所以需要偶见接口来消除不稳定的因素, 让不稳定的部分可以用一种稳定的方式来管理
+
+第二点, 代码和测试可以围绕着接口螺旋前进, 使用TDD可以帮助我们进行这种螺旋式的迭代, 在一个设计良好的系统中, 接口是稳定的, 测试接口的代码是稳定的, 实现可以是不稳定的, 在迭代开发的过程中, 我们要不断的重构, 让测试代码和产品代码都往最优的方向发展
+
+纵观我们写的KV Server, 包括测试在内, 你很难发现有函数或者方法超过50行, 代码可读性很强, 几乎不需要注释, 就可以理解, 另外因为都是用接口做的交互, 未来维护和添加新的功能, 也基本上满足了OCP原则, 除了dispatch函数需要很小的修改外, 其他新的代码都是在实现一些接口而已
+
+相信你能初步感受Rust下撰写代码的最佳实践, 如果你之前用其他语言开发, 已经采用了类似的最佳实践, 那么可以感受一下同样的实践在Rust下使用的那种优雅; 

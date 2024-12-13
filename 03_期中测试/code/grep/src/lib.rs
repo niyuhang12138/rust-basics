@@ -5,56 +5,47 @@ use std::{
     path::Path,
 };
 
-use clap::Parser;
-
-mod error;
 use colored::Colorize;
-pub use error::GrepError;
 use itertools::Itertools;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use regex::Regex;
 
-/// 定义类型 在使用是可以简化复杂的类型的书写
-type StrategyFn<W, R> = fn(&Path, BufReader<R>, &Regex, &mut W) -> Result<(), GrepError>;
+use anyhow::Result;
 
-/// 简化版本的grep, 支持正则表达式和文件通配符
+use clap::Parser;
+
+mod error;
+
+pub use error::GrepError;
+
+pub type StrategyFn<R, W> = fn(&Path, &Regex, BufReader<R>, &mut W) -> Result<(), GrepError>;
+
+/// `Grep` file search content util
 #[derive(Debug, Parser)]
-#[command(version, about, long_about = None)]
-
+#[command(version, about = "`Grep` file search content util", long_about = None)]
 pub struct GrepConfig {
-    // 用于查找文件的正则表达式
     #[arg(short, long)]
     pattern: String,
-    // 文件通配符
+
     #[arg(short, long)]
     glob: String,
 }
 
 impl GrepConfig {
-    // 使用缺省策略来查找匹配
     pub fn match_with_default_strategy(&self) -> Result<(), GrepError> {
         self.match_with(default_strategy)
     }
 
-    // 是否某个策略来查找匹配
-    pub fn match_with(&self, strategy: StrategyFn<Stdout, File>) -> Result<(), GrepError> {
-        println!("abcd");
-        // 正则表达式
+    pub fn match_with(&self, strategy_fn: StrategyFn<File, Stdout>) -> Result<(), GrepError> {
         let regex = Regex::new(&self.pattern)?;
-
-        // 生成所有符合通配符的文件 glob::glob返回一个Result OK中包含一个Paths, 它实现了Iterator的迭代器
         let files = glob::glob(&self.glob)?.collect::<Vec<_>>();
 
-        println!("files: {files:?}");
-
-        // 并行处理所有的文件
         files.into_par_iter().for_each(|v| {
-            if let Ok(filename) = v {
-                if let Ok(file) = File::open(&filename) {
+            if let Ok(filepath) = v {
+                if let Ok(file) = File::open(&filepath) {
                     let reader = BufReader::new(file);
                     let mut stdout = io::stdout();
-
-                    if let Err(e) = strategy(filename.as_path(), reader, &regex, &mut stdout) {
+                    if let Err(e) = strategy_fn(filepath.as_path(), &regex, reader, &mut stdout) {
                         println!("Internal error: {e:?}");
                     }
                 }
@@ -64,11 +55,10 @@ impl GrepConfig {
     }
 }
 
-/// 缺省策略, 从头到尾行查找, 最后输出到writer
-pub fn default_strategy<W: io::Write, R: Read>(
+pub fn default_strategy<R: Read, W: io::Write>(
     path: &Path,
-    reader: BufReader<R>,
     pattern: &Regex,
+    reader: BufReader<R>,
     writer: &mut W,
 ) -> Result<(), GrepError> {
     let matches = reader
@@ -101,8 +91,8 @@ pub fn format_line(line: &str, lineno: usize, range: Range<usize>) -> String {
     let prefix = &line[..start];
     format!(
         "{0: >6}:{1: <3} {2}{3}{4}",
-        lineno.to_string().blue(),
-        (prefix.chars().count() + 1).to_string().cyan(),
+        (lineno).to_string().blue(),
+        start.to_string().cyan(),
         prefix,
         &line[start..end].red(),
         &line[end..]
@@ -115,31 +105,31 @@ mod tests {
 
     #[test]
     fn format_line_should_work() {
-        let result = format_line("Hello, Try~", 1000, 7..10);
+        let result = format_line("Hello, Tyr~", 1000, 7..10);
         let expected = format!(
             "{0: >6}:{1: <3} Hello, {2}~",
             "1000".blue(),
-            "8".cyan(),
-            "Try".red()
+            "7".cyan(),
+            "Tyr".red()
         );
         assert_eq!(result, expected);
     }
 
     #[test]
-    fn default_should_work() {
-        let path = Path::new("test_file.txt");
-        let reader = BufReader::new(File::open(&path).unwrap());
-        let pattern = Regex::new(r"Hello World;").unwrap();
+    fn default_strategy_should_work() {
+        let path = Path::new("src/main.rs");
+        let input = b"hello world!\nhey Tyr!";
+        let reader = BufReader::new(&input[..]);
+        let pattern = Regex::new(r"he\w+").unwrap();
         let mut writer = Vec::new();
-        default_strategy(path, reader, &pattern, &mut writer).unwrap();
+        default_strategy(path, &pattern, reader, &mut writer).unwrap();
         let result = String::from_utf8(writer).unwrap();
         let expected = [
-            String::from("test_file.txt"),
-            format_line("Hello World;", 1, 0..12),
-            format_line("Hello World;", 3, 0..12),
+            String::from("src/main.rs"),
+            format_line("hello world!", 1, 0..5),
+            format_line("hey Tyr!\n", 2, 0..3),
         ];
-        println!("{result}");
-        println!("{}", expected.join("\n"));
-        assert_eq!(result, expected.join("\n") + "\n");
+
+        assert_eq!(result, expected.join("\n"));
     }
 }

@@ -1,7 +1,3 @@
-use std::{process::Command, sync::Arc};
-
-use tracing::debug;
-
 use crate::*;
 
 impl CommandService for Hget {
@@ -109,12 +105,8 @@ impl CommandService for Hmexist {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
-
-    use http::StatusCode;
-    use tracing::info;
 
     use super::*;
 

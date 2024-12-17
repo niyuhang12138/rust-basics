@@ -1,6 +1,9 @@
 mod command_service;
 
-pub use command_service::*;
+use std::sync::Arc;
+
+// pub use command_service::*;
+use tracing::debug;
 
 use crate::*;
 
@@ -59,12 +62,16 @@ impl<Store: Storage> Service<Store> {
     pub fn execute(&self, cmd: CommandRequest) -> CommandResponse {
         debug!("Got request: {cmd:?}");
 
-        // TODO: 发送on_received
+        self.inner.on_received.notify(&cmd);
 
-        let res = dispatch(cmd, &self.inner.store);
+        let mut res = dispatch(cmd, &self.inner.store);
         debug!("Execute response: {res:?}");
 
-        // TODO: 发送on_executed
+        self.inner.on_executed.notify(&res);
+        self.inner.on_before_send.notify(&mut res);
+        if !self.inner.on_before_send.is_empty() {
+            debug!("Modified response: {res:?}")
+        }
 
         res
     }

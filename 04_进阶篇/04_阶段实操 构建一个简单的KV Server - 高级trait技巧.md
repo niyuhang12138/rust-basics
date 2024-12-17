@@ -319,3 +319,287 @@ impl<Arg> NotifyMut<Arg> for Vec<fn(&mut Arg)> {
 
 Notify和NotifyMut trait实现好之后, 我们就可以修改execute方法了
 
+```rust
+pub fn execute(&self, cmd: CommandRequest) -> CommandResponse {
+    debug!("Got request: {cmd:?}");
+
+    self.inner.on_received.notify(&cmd);
+
+    let mut res = dispatch(cmd, &self.inner.store);
+    debug!("Execute response: {res:?}");
+
+    self.inner.on_executed.notify(&res);
+    self.inner.on_before_send.notify(&mut res);
+    if !self.inner.on_before_send.is_empty() {
+        debug!("Modified response: {res:?}")
+    }
+
+    res
+}
+```
+
+现在, 响应的事件就尅被通知到相应的处理函数中了, 这个通知机制目前还是同步的函数调用, 未来如何需要, 我们可以将其改成消息传递, 进行异步处理
+
+## 为持久化数据库实现Storage trait
+
+到目前为止, 我们的KV store还都是一个在内存中的KV store, 一旦终止应用程序, 用户存储的所有key / value都会消失, 我们希望存储能够持久化
+
+一个方案是为MemTable添加WAL和disk snapshot支持, 让用户发送的所有涉及更新的命令都按顺序存储在磁盘上, 同时定期做snapshot, 便于数据的快速恢复; 另一个方法是使用已有的KV store, 比如RocksDB或者sled
+
+RocksDB是Facebook在Google的LevelDB基础上开发的嵌入式KV store, 用C++编写, 而sled是Rust社区里涌现的优秀的KV store, 对标RocksDB, 二者功能很类似, 从演示的角度来说, sled使用起来更简单, 更加适合今天的内容, 如果在生产环境中使用, RocksDB更加合适, 因为它在各种复杂的生产环境中经历了千锤百炼
+
+所以我们今天尝试使用sled实现Storage trait, 让它能够适配我们的KV Server
+
+首先在toml文件中引入sled
+
+然后创建`src/storage/sleddb.rs`, 并添加如下代码:
+
+```rust
+use core::str;
+use std::path::Path;
+
+use sled::{Db, IVec};
+
+use crate::{KvError, Kvpair, Storage, StorageIter, Value};
+
+#[derive(Debug)]
+pub struct SledDb(Db);
+
+impl SledDb {
+    pub fn new(path: impl AsRef<Path>) -> Self {
+        Self(sled::open(path).unwrap())
+    }
+
+    // 在sleddb里, 因为它可以scan_prefix, 我们用prefix
+    // 来模拟一个table, 还可以用其他方法
+    fn get_full_key(table: &str, key: &str) -> String {
+        format!("{table}:{key}")
+    }
+
+    // 遍历table的key, 我们直接把prefix; 当成table
+    fn get_table_prefix(table: &str) -> String {
+        format!("{table}:")
+    }
+}
+
+/// 把Option<Result<T, E>>flip转换成Result<Option<T>, E>
+/// 从这个函数中, 我们看到函数式编程的优雅
+fn flip<T, E>(x: Option<Result<T, E>>) -> Result<Option<T>, E> {
+    x.map_or(Ok(None), |v| v.map(Some))
+}
+
+impl Storage for SledDb {
+    fn get(&self, table: &str, key: &str) -> Result<Option<Value>, KvError> {
+        let name = SledDb::get_full_key(table, key);
+        let result = self.0.get(name.as_bytes())?.map(|v| v.as_ref().try_into());
+        flip(result)
+    }
+
+    fn set(&self, table: &str, key: String, value: Value) -> Result<Option<Value>, KvError> {
+        let key = key.as_str();
+        let name = SledDb::get_full_key(table, key);
+        let data: Vec<u8> = value.try_into()?;
+        let result = self
+            .0
+            .insert(name.as_bytes(), data)?
+            .map(|v| v.as_ref().try_into());
+        flip(result)
+    }
+
+    fn contains(&self, table: &str, key: &str) -> Result<bool, KvError> {
+        let name = SledDb::get_full_key(table, key);
+        Ok(self.0.contains_key(name)?)
+    }
+
+    fn del(&self, table: &str, key: &str) -> Result<Option<Value>, KvError> {
+        let name = SledDb::get_full_key(table, key);
+        let result = self
+            .0
+            .remove(name.as_bytes())?
+            .map(|v| v.as_ref().try_into());
+        flip(result)
+    }
+
+    fn get_all(&self, table: &str) -> Result<Vec<crate::Kvpair>, KvError> {
+        let prefix = SledDb::get_table_prefix(table);
+        let result = self.0.scan_prefix(prefix).map(|v| v.into()).collect();
+        Ok(result)
+    }
+
+    fn get_iter(&self, table: &str) -> Result<Box<dyn Iterator<Item = crate::Kvpair>>, KvError> {
+        let prefix = SledDb::get_table_prefix(table);
+        let iter = StorageIter::new(self.0.scan_prefix(prefix));
+        Ok(Box::new(iter))
+    }
+}
+
+impl From<Result<(IVec, IVec), sled::Error>> for Kvpair {
+    fn from(value: Result<(IVec, IVec), sled::Error>) -> Self {
+        match value {
+            Ok((k, v)) => match v.as_ref().try_into() {
+                Ok(v) => Kvpair::new(ivec_to_key(k.as_ref()), v),
+                Err(_) => Kvpair::default(),
+            },
+            _ => Kvpair::default(),
+        }
+    }
+}
+
+fn ivec_to_key(ivec: &[u8]) -> &str {
+    let s = str::from_utf8(ivec).unwrap();
+    let mut iter = s.split(":");
+    iter.next();
+    iter.next().unwrap()
+}
+```
+
+这段代码主要就是在实现Storage trait, 每个方法都很简单, 就是在sled提供的功能上增加了一次封装, 如果你对代码中某个调用有顾虑, 可以参考sled的文档
+
+在`src/storage/mod.rs`里引入sleddb, 我们就可以加上相关的测试, 测试新的Storage实现了
+
+```rust
+#[test]
+fn sleddb_basic_interface_should_work() {
+    let dir = tempdir().unwrap();
+    let store = SledDb::new(dir);
+    test_get_all(store)
+}
+
+#[test]
+fn sleddb_iter_should_work() {
+    let dir = tempdir().unwrap();
+    let store = SledDb::new(dir);
+    test_get_iter(store);
+}
+```
+
+因为SledDB创建时需要指定一个目录, 所以要在测试中使用tempfile库, 它能让文件在测试件数时被回收, 我们在`Cargo.toml`中引入:
+
+```rust
+[dev-dependencies]
+...
+tempfile = "3" # 处理临时目录和临时文件
+...
+```
+
+  就可以进行测试了
+
+## 构建新的Kv Server
+
+现在完成了SledDb和事件通知相关的实现, 我们可以尝试构建支持事件的通知, 并且使用SledDb的KV Server了, 把`examples/server.rs`拷贝出`examples/server_with_sled.rs`然后修改:
+
+```rust
+use anyhow::Result;
+use async_prost::AsyncProstStream;
+use futures::prelude::*;
+use kv::{CommandRequest, CommandResponse, Service, ServiceInner, SledDb};
+use tokio::net::TcpListener;
+use tracing::info;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
+
+    // let service = Service::new(MemTable::new());
+    // let service: Service = ServiceInner::new(MemTable::new()).into();
+    let service: Service<SledDb> = ServiceInner::new(SledDb::new("kv_server"))
+        .fn_before_send(|res| match res.message.as_ref() {
+            "" => res.message = "altered. Original message is empty".into(),
+            s => res.message = format!("altered: {s}"),
+        })
+        .into();
+
+    let addr = "127.0.0.1:9527";
+    let listener = TcpListener::bind(addr).await?;
+    info!("Start listener on {addr}");
+
+    loop {
+        let (stream, addr) = listener.accept().await?;
+        info!("Client {:?} connected", addr);
+
+        let svc = service.clone();
+
+        tokio::spawn(async move {
+            let mut stream =
+                AsyncProstStream::<_, CommandRequest, CommandResponse, _>::from(stream).for_async();
+
+            while let Some(Ok(cmd)) = stream.next().await {
+                let res = svc.execute(cmd);
+                stream.send(res).await.unwrap();
+            }
+        });
+
+        info!("Client {:?} disconnected", addr);
+    }
+}
+use anyhow::Result;
+use async_prost::AsyncProstStream;
+use futures::prelude::*;
+use kv::{CommandRequest, CommandResponse, Service, ServiceInner, SledDb};
+use tokio::net::TcpListener;
+use tracing::info;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
+
+    // let service = Service::new(MemTable::new());
+    // let service: Service = ServiceInner::new(MemTable::new()).into();
+    let service: Service<SledDb> = ServiceInner::new(SledDb::new("kv_server"))
+        .fn_before_send(|res| match res.message.as_ref() {
+            "" => res.message = "altered. Original message is empty".into(),
+            s => res.message = format!("altered: {s}"),
+        })
+        .into();
+
+    let addr = "127.0.0.1:9527";
+    let listener = TcpListener::bind(addr).await?;
+    info!("Start listener on {addr}");
+
+    loop {
+        let (stream, addr) = listener.accept().await?;
+        info!("Client {:?} connected", addr);
+
+        let svc = service.clone();
+
+        tokio::spawn(async move {
+            let mut stream =
+                AsyncProstStream::<_, CommandRequest, CommandResponse, _>::from(stream).for_async();
+
+            while let Some(Ok(cmd)) = stream.next().await {
+                let res = svc.execute(cmd);
+                stream.send(res).await.unwrap();
+            }
+        });
+
+        info!("Client {:?} disconnected", addr);
+    }
+}
+```
+
+完成之后, 我们可以打开一个命令行, 运行: `RUST_LOG=into cargo run --example server_with_sled --quiet`, 然后在另一个命令行窗口运行:`RUST_LOG=info cargo run --example client --quiet`
+
+此时服务器和客户端都收到彼此的请求和响应, 并且处理正常, 如果你停掉服务器, 然后再运行, 会发现客户端在尝试HSET时得到服务器旧的值, 我们的新版KV Server可以对数据进行持久化了
+
+此外, 如果你注意看client日志, 会发现原本应该是空字符串的message包含了`altered. Original message is empty`
+
+这是因为我们的服务注册了fn_before_send的事件通知, 对返回的数据进行了修改, 未来我们还可以用这些事件做很多事情, 比如监控数据的发送, 甚至写WAL
+
+## 小结
+
+今天的课程我们进一步认识到了trait的为例, 为系统设计合理的trait, 整个系统的可拓展性就大大增强了, 之后在添加新的功能的时候, 并不需要改动多少已有的代码
+
+在使用trait做抽象的时候, 我们要衡量, 这么做的好处是什么, 它未来可以为实现者带来什么帮助, 就像我们再创写的StorageIter, 它是实现了Iterator trait, 并封装了map的处理逻辑, 让这个公共的步骤可以在Storage trait中复用
+
+除此之外, 也进一步的熟悉了如何未带泛型参数的数据结构实现trait, 我们不仅可以为具体的数据结构实现trait, 也可以为更笼统的泛型参数实现trait
+
+看我们写的KV Server的核心逻辑, 整体代码似乎没有太多的复杂生命周期, 或者太过于抽象的泛型结构
+
+是的, 别看我们在介绍Rust基础知识的时候, 扎的比较深, 但是大多数写代码的时候, 并不会用到那么深的知识, Rust编译器会尽最大的努力, 让你的代码简单, 如果你用clippy这样的linter的话, 它还会进一步给你提一些建议, 让你的代码变得更简单
+
+那么, 为什么我们还要讲的那么深入呢?
+
+这是因为我们写代码的时候不可避免的引入第三方库, 你也看到了, 在写项目的是偶用了不少依赖, 当你使用这些库的时候, 不可避免的阅读一些它们的源码, 而这些源码, 可能有多种各种各样复杂的写法
+
+深入的了解Rust的基础知识, 可以帮我们更快, 更清晰的阅读源码, 而更快更清晰的读懂别人的源码, 又可以更快的帮助我们用好别人的库, 从而帮助我们写好我们的代码
+

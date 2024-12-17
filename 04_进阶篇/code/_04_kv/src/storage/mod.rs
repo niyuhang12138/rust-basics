@@ -1,8 +1,12 @@
+use crate::{KvError, Kvpair, Value};
+
 mod memory;
+// mod rocksdb;
+mod sleddb;
 
 pub use memory::*;
-
-use crate::{KvError, Kvpair, Value};
+// pub use rocksdb::*;
+pub use sleddb::*;
 
 /// 对存储的抽象. 我们不关心数据存在哪里, 但需要定义外界如何和存储打交道
 pub trait Storage {
@@ -39,7 +43,7 @@ impl<T> StorageIter<T> {
 }
 
 impl<T> Iterator for StorageIter<T>
-where 
+where
     T: Iterator,
     T::Item: Into<Kvpair>,
 {
@@ -52,6 +56,9 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    use tempfile::tempdir;
+
     use super::*;
 
     #[test]
@@ -71,6 +78,34 @@ mod tests {
         let store = MemTable::new();
         test_get_iter(store);
     }
+
+    #[test]
+    fn sleddb_basic_interface_should_work() {
+        let dir = tempdir().unwrap();
+        let store = SledDb::new(dir);
+        test_get_all(store)
+    }
+
+    #[test]
+    fn sleddb_iter_should_work() {
+        let dir = tempdir().unwrap();
+        let store = SledDb::new(dir);
+        test_get_iter(store);
+    }
+
+    // #[test]
+    // fn rocksdb_basic_interface_should_work() {
+    //     let dir = tempdir().unwrap();
+    //     let store = RocksDb::new(dir);
+    //     test_get_all(store);
+    // }
+
+    // #[test]
+    // fn rocks_iter_should_work() {
+    //     let dir = tempdir().unwrap();
+    //     let store = RocksDb::new(dir);
+    //     test_get_iter(store);
+    // }
 
     fn test_basic_interface(store: impl Storage) {
         // 第一次set会创建table, 插入key并返回None(因为之前没有值)

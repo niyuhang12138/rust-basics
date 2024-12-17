@@ -2,6 +2,7 @@ mod abi;
 
 pub use abi::{command_request::RequestData, *};
 use http::StatusCode;
+use prost::Message;
 
 use crate::KvError;
 
@@ -171,7 +172,7 @@ impl From<Vec<Kvpair>> for CommandResponse {
 }
 
 impl From<bool> for CommandResponse {
-    fn from(value: bool) -> Self {
+    fn from(_value: bool) -> Self {
         Self {
             status: StatusCode::OK.as_u16() as _,
             ..Default::default()
@@ -192,5 +193,23 @@ impl From<Vec<Value>> for CommandResponse {
 impl From<(String, Value)> for Kvpair {
     fn from(value: (String, Value)) -> Self {
         Kvpair::new(value.0, value.1)
+    }
+}
+
+impl TryFrom<Value> for Vec<u8> {
+    type Error = KvError;
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        let mut buf = Vec::with_capacity(value.encoded_len());
+        value.encode(&mut buf)?;
+        Ok(buf)
+    }
+}
+
+impl TryFrom<&[u8]> for Value {
+    type Error = KvError;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        let msg = Value::decode(value)?;
+        Ok(msg)
     }
 }

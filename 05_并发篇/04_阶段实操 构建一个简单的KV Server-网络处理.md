@@ -360,3 +360,472 @@ impl From<Bytes> for Value {
 
 再进一步写网络相关的代码之前, 还有一个问题需要解决: docode_frame函数使用的BytesMut, 是如何从socket里拿出来的, 显然先读四个字节, 取出长度N, 然后在读N个字节, 这个细节和frame关系很大, 所以还需要在`src/network/frame.rs`里写个辅助函数read_frame
 
+```rust
+/// 从stream中读取一个完整的stream
+pub async fn read_frame<S>(stream: &mut S, buf: &mut BytesMut) -> Result<(), KvError>
+where
+    S: AsyncRead + Unpin + Send,
+{
+    let header = stream.read_u32().await? as usize;
+    let (len, _compressed) = decode_header(header);
+    // 如果美欧那么大的内存, 就分配至少一个frame的内存, 保证它可用
+    buf.reserve(LEN_LEN + len);
+    buf.put_u32(header as _);
+    // advance_mut是unsafe的原因是, 从当前我盒子pos到pos + len
+    // 这段内存目前没有初始化, 我们就是为了reserve这段内存, 然后从stream里读取, 读取完, 它就是初始化的, 所以我们这么用是安全的
+    unsafe { buf.advance_mut(len) }
+
+    stream.read_exact(&mut buf[LEN_LEN..]).await?;
+
+    Ok(())
+}
+```
+
+在写read_frame的时候, 我们不希望它只能用于TcpStream, 这样太不灵活了, 所以用了泛型参数S, 要求传入S必须满足AsyncRead + Unpin + Send, 我们来看看这三个约束
+
+AsyncRead是tokio下的一个trait, 用于做异步读取, 它有一个方法poll_read
+
+```rust
+pub trait AsyncRead {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>
+    ) -> Poll<Result<()>>;
+}
+```
+
+一旦某个数据结构实现了AsyncRead, 它就可以使用AsyncReadExt提供的多达29个辅助方法, 这是因为任何实现了AsyncRead的数据结构, 都自动实现了AsyncReadExt:
+
+```rust
+impl<R: AsyncRead + ?Sized> AsyncReadExt for R {}
+```
+
+我们虽然还没有正式学怎么做异步处理, 但是之前看到了很多Async / await的代码
+
+异步处理, 目前可以把它想象成一个内部状态机的数据结构, 异步运行时根据需要不断地做poll操作, 直到它返回Poll::Ready, 说明得到了处理结果; 如果它返回了Poll:::Pending, 说明目前无法继续, 异步运行时将其挂起, 等下次某个事件将这个任务唤醒
+
+对于Socket来说, 读取socket局势不断poll_read的过程, 直到读到了满足的ReadBuf需要的内容
+
+至于Send的约束, 很好理解, S需要能在不同线程间移动所有权, 对于Unpin约束, 未来在将Future的时候再具体说, 现在你就权记住, 如果一个编译器抱怨一个泛型参数cannot be unpinned, 一般来说这个泛型参数需要加Unpin的约束
+
+既然有写了一些带阿米, 我们需要为其撰写相应的测试, 但是要测read_frame函数, 需要一个支持AsyncRead的数据结构, 虽然TcpStream支持它, 但是我们不应该在单元测试中引入太过于复杂的行为, 为了测试read_frame而建立TCP连接, 显然没有必要, 怎么办?
+
+在之前聊过测试代码和产品代码同等重要性, 所以在开发中, 也要为测试代码创还能合适的生态环境, 让测试简洁, 可读性强, 所我们就创建一个简单的数据结构, 使其实现AsyncRead, 这样就可以单元测试read_frame了
+
+在测试中加入一下代码:
+
+```rust
+struct DummyStream {
+    buf: BytesMut,
+}
+
+impl AsyncRead for DummyStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        // 看看ReadBuf需要多大的数据
+        let len = buf.capacity();
+
+        // split 出这么大的数据
+        let data = self.get_mut().buf.split_to(len);
+
+        // 拷贝给ReadBuf
+        buf.put_slice(&data);
+
+        // 完工
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+```
+
+因为只需要保证AsyncRead接口的正确性, 所以不需要太复杂的逻辑, 我们就放一个buffer, poll_read需要读多大的数据, 我们就给多大的数据, 有了这个DummyStream, 就可以测试read_frame了
+
+```rust
+#[tokio::test]
+async fn read_frame_should_work() {
+    let mut buf = BytesMut::new();
+    let cmd = CommandRequest::new_hdel("t1", "k1");
+    cmd.encode_frame(&mut buf).unwrap();
+    let mut stream = DummyStream { buf };
+
+    let mut data = BytesMut::new();
+    read_frame(&mut stream, &mut data).await.unwrap();
+
+    let cmd1 = CommandRequest::decode_frame(&mut data).unwrap();
+
+    assert_eq!(cmd, cmd1);
+}
+```
+
+## 让网络层可以像AsyncProst那样方便使用
+
+现在我们的frame已经可以正常工作了, 接下来要构思一下, 服务端和客户端如何封装
+
+对于服务器, 我们希望可以对accept下来的TcpStream提供一个process方法, 处理协议的细节
+
+```rust
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
+    let addr = "127.0.0.1:9527";
+    let service: Service = ServiceInner::new(MemTable::new()).into();
+    let listener = TcpListener::bind(addr).await?;
+    info!("Start listening on {}", addr);
+    loop {
+        let (stream, addr) = listener.accept().await?;
+        info!("Client {:?} connected", addr);
+        let stream = ProstServerStream::new(stream, service.clone());
+        tokio::spawn(async move { stream.process().await });
+    }
+}
+```
+
+这个process方法, 实际上就是对`examples/server.rs`中tokio::spawn里的while loop的封装
+
+```rust
+while let Some(Ok(cmd)) = stream.next().await {
+    info!("Got a new command: {:?}", cmd);
+    let res = svc.execute(cmd);
+    stream.send(res).await.unwrap();
+}
+```
+
+对于客户端, 我们希望直接execute一个命令, 就能得到一个结果:
+
+```rust
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
+    let addr = "127.0.0.1:9527";
+    // 连接服务器
+    let stream = TcpStream::connect(addr).await?;
+    let mut client = ProstClientStream::new(stream);
+    // 生成一个 HSET 命令
+    let cmd = CommandRequest::new_hset("table1", "hello", "world".to_string().into);
+    // 发送 HSET 命令
+    let data = client.execute(cmd).await?;
+    info!("Got response {:?}", data);
+    Ok(())
+}
+```
+
+这个execute, 实际上就是对examples/client.rs`中发送和接受代码的封装
+
+```rust
+client.send(cmd).await?;
+if let Some(Ok(data)) = client.next().await {
+    info!("Got response {:?}", data);
+}
+```
+
+这样的代码, 看起来很简洁, 维护起来也很方便
+
+先看服务器处理一个TcpStream的数据结构, 它需要包含TcpStream, 还有我们之前创建用于处理客户端命令的Service, 所以让服务器处理TcpStream的结构包含这两部分:
+
+```rust
+pub struct ProstServerStream<S> {
+  inner: S,
+  service: Service,
+}
+```
+
+而客户端处理TcpStream的结构就只需要包含TcpStream
+
+```rust
+pub struct ProstClientStream<S> {
+  inner: S,
+}
+```
+
+这里, 依旧使用了泛型参数S, 未来如果要支持WebSocket, 或者在TCP之上支持TLS, 他都可以让我们无需改变这一层代码
+
+接下来就是具体的实现了, 有了frame的封装, 服务器的process方法和客户端的execute方法都很容易实现, 我们直接在`src/network/mod.rs`中添加完整代码:
+
+```rust
+use anyhow::Result;
+use bytes::BytesMut;
+pub use frame::*;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tracing::info;
+
+use crate::{CommandRequest, CommandResponse, KvError, Service};
+
+mod frame;
+
+/// 处理服务器端某个accept下来的socket读写
+pub struct ProstServerStream<S> {
+    inner: S,
+    service: Service,
+}
+
+impl<S> ProstServerStream<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    pub fn new(stream: S, service: Service) -> Self {
+        Self {
+            inner: stream,
+            service,
+        }
+    }
+
+    pub async fn process(mut self) -> Result<(), KvError> {
+        while let Ok(cmd) = self.recv().await {
+            info!("Got a new command: {cmd:?}");
+            let res = self.service.execute(cmd);
+            self.send(res).await?;
+        }
+        Ok(())
+    }
+
+    async fn send(&mut self, msg: CommandResponse) -> Result<(), KvError> {
+        let mut buf = BytesMut::new();
+        msg.encode_frame(&mut buf)?;
+        let encoded = buf.freeze();
+        self.inner.write_all(&encoded[..]).await?;
+        Ok(())
+    }
+
+    async fn recv(&mut self) -> Result<CommandRequest, KvError> {
+        let mut buf = BytesMut::new();
+        let stream = &mut self.inner;
+        read_frame(stream, &mut buf).await;
+        CommandRequest::decode_frame(&mut buf)
+    }
+}
+
+/// 处理客户端socket读写
+pub struct ProstClientStream<S> {
+    inner: S,
+}
+
+impl<S> ProstClientStream<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    pub fn new(stream: S) -> Self {
+        Self { inner: stream }
+    }
+
+    pub async fn execute(&mut self, cmd: CommandRequest) -> Result<CommandResponse, KvError> {
+        self.send(cmd).await?;
+        Ok(self.recv().await?)
+    }
+
+    async fn send(&mut self, msg: CommandRequest) -> Result<(), KvError> {
+        let mut buf = BytesMut::new();
+        msg.encode_frame(&mut buf)?;
+        let encoded = buf.freeze();
+        self.inner.write_all(&encoded[..]).await?;
+        Ok(())
+    }
+
+    async fn recv(&mut self) -> Result<CommandResponse, KvError> {
+        let mut buf = BytesMut::new();
+        let stream = &mut self.inner;
+        read_frame(stream, &mut buf).await?;
+        CommandResponse::decode_frame(&mut buf)
+    }
+}
+```
+
+这段代码并不难阅读, 基本上和frame的测试代码大同小异
+
+当然, 我们还是需要写段代码来测试一些客户端和服务器的交互流程:
+
+```rust
+#[cfg(test)]
+mod tests {
+
+    use std::{net::SocketAddr, vec};
+
+    use bytes::Bytes;
+    use tokio::net::{TcpListener, TcpStream};
+
+    use crate::{assert_res_ok, MemTable, ServiceInner, Value};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn client_server_basic_communication_should_work() -> anyhow::Result<()> {
+        let addr = start_server().await?;
+
+        let stream = TcpStream::connect(addr).await?;
+        let mut client = ProstClientStream::new(stream);
+
+        // 发送HSET等待回应
+        let cmd = CommandRequest::new_hset("t1", "k1", "v1".into());
+        let res = client.execute(cmd).await.unwrap();
+
+        // 第一个HSET服务器应该返回None
+        assert_res_ok(res, &[Value::default()], &[]);
+
+        // 再发一个HGET
+        let cmd = CommandRequest::new_hget("t1", "k1");
+        let res = client.execute(cmd).await?;
+
+        // 服务器应该返回上一次的结果
+        assert_res_ok(res, &["v1".into()], &[]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn client_server_compression_should_work() -> anyhow::Result<()> {
+      let addr = start_server().await?;
+
+      let stream = TcpStream::connect(addr).await?;
+      let mut client = ProstClientStream::new(stream);
+
+      let v: Value = Bytes::from(vec![0u8; 16384]).into();
+      let cmd = CommandRequest::new_hset("t2", "k2", v.clone());
+      let res = client.execute(cmd).await?;
+
+      assert_res_ok(res, &[Value::default()], &[]);
+
+      let cmd = CommandRequest::new_hget("t2", "k2");
+      let res = client.execute(cmd).await?;
+
+      assert_res_ok(res, &[v], &[]);
+
+      Ok(())
+    }
+
+    async fn start_server() -> Result<SocketAddr> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let service: Service = ServiceInner::new(MemTable::new()).into();
+                let server = ProstServerStream::new(stream, service);
+                tokio::spawn(server.process());
+            }
+        });
+        Ok(addr)
+    }
+}
+```
+
+## 正式创建Kv-server和kv-client
+
+我们之前写了很多代码, 真正可运行的都是server / client都是examples下的代码, 现在我们终于要正式创建Kv-server / Kv-client了
+
+首先在Cargo.toml文件中, 加入两个可执行文件: kvs和kvc, 还需要把一些依赖移动到dependencies下
+
+```rust
+[package]
+name = "kv"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "kvs"
+path = "src/server.rs"
+
+[[bin]]
+name = "kvc"
+path = "src/client.rs"
+
+[dependencies]
+bytes = "1" # 高效处理网络 buffer 的库
+dashmap = "6.1.0" # 并发 HashMap
+flate2 = "1.0.35"
+http = "1.2" # 我们使用 HTTP status code 所以引入这个类型库
+prost = "0.9" # 处理 protobuf 的代码
+sled = "0.34.7"
+thiserror = "2.0.6" # 错误定义和处理
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1" # 日志处理
+update = "0.0.0"
+tracing-subscriber = "0.3" # 日志处理
+anyhow = "1" # 错误处理
+
+[dev-dependencies]
+async-prost = "0.3" # 支持把 protobuf 封装成 TCP frame
+futures = "0.3" # 提供 Stream trait
+tempfile = "3.14.0"
+tokio-util = { version = "0.7.13", features = ["codec"] }
+
+[build-dependencies]
+prost-build = "0.9" # 
+```
+
+然后创建`src/client.rs`和`src/server.rs`, 分别写入以下代码:
+
+**client**
+
+```rust
+use anyhow::Result;
+use kv::{CommandRequest, ProstClientStream};
+use tokio::net::TcpStream;
+use tracing::info;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
+
+    let addr = "127.0.0.1:9527";
+
+    let stream = TcpStream::connect(addr).await?;
+
+    let mut client = ProstClientStream::new(stream);
+
+    // HSET
+    let cmd = CommandRequest::new_hset("table1", "hello", "world".to_string().into());
+
+    // 发送命令
+    let data = client.execute(cmd).await?;
+
+    info!("Got response {data:?}");
+
+    Ok(())
+}
+```
+
+**servr**
+
+```rust
+use anyhow::Result;
+use kv::{MemTable, ProstServerStream, Service, ServiceInner};
+use tokio::net::TcpListener;
+use tracing::info;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
+
+    let addr = "127.0.0.0.1:9527";
+
+    let service: Service = ServiceInner::new(MemTable::new()).into();
+
+    let listener = TcpListener::bind(addr).await?;
+
+    info!("Start listening on {addr}");
+
+    loop {
+        let (stream, addr) = listener.accept().await?;
+        info!("Client {addr:?} connected");
+        let stream = ProstServerStream::new(stream, service.clone());
+        tokio::spawn(async move { stream.process().await });
+    }
+}
+```
+
+这和之前的代码几乎一致, 不同的是, 我们使用了自己的frame处理方法
+
+完成之后, 我们可以打开一个命令行窗口, 运行`RUST_LOG=info cargo run --bin kvs --quiet`, 然后在另一个命令行窗口运行`RUST_LOG=info cargo run --bin kvc --quiet`, 此时服务器和客户端都收到了彼此的请求和响应, 并且处理正常
+
+## 小结
+
+网络开发时Rust下一个很重要的应用场景, tokio为我们提供了很棒的异步网络开发支持
+
+在开发网络协议的时候, 你要确定你的frame如何封装, 一般来说, 长度 + protobuf足以应付绝大多数的场景, 这一讲我们虽然详细解析介绍了自己改如何处理长度封装frame的方法, 其实tokio-util提供了LengthDelimitCodec, 可做完成今天frame部分的处理, 如果自己撰写网络程序, 可以直接使用它
+
+在网络开发的时候, 如何做单元测试是一大痛点, 我们可以根据其实现的接口, 围绕着接口来构建测试数据结构, 比如TcpStream实现了AsyncRead / AsyncWrite, 考虑简洁和可读, 为了测试read_frame, 我们构建了DummyStream来协助测试, 你也可以用类似的方式处理你所做项目的测试需求
+
+结构良好架构清晰的代码, 一定是很容易测试的代码, 纵观整个项目, 从CommandService triat和Storage trait, 一路到现在网络层的测试, 如果使用tarpaulin来看测试覆盖率, 你会发现, 有接近89%, 如果不算`src/server.rs`和`src/client.rs`的话, 有接近92%的测试覆盖率, 即便在生产环境的代码里, 这也算是很高质量的测试覆盖率了

@@ -3,6 +3,14 @@ name = "kv"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "kvs"
+path = "src/server.rs"
+
+[[bin]]
+name = "kvc"
+path = "src/client.rs"
+
 [dependencies]
 bytes = "1" # 高效处理网络 buffer 的库
 dashmap = "6.1.0" # 并发 HashMap

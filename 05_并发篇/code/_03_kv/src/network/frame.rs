@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 use bytes::{Buf, BufMut, BytesMut};
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use prost::Message;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tracing::debug;
 
 use crate::{CommandRequest, CommandResponse, KvError};
@@ -98,10 +99,53 @@ pub fn decode_header(header: usize) -> (usize, bool) {
     (len, compressed)
 }
 
+/// 从stream中读取一个完整的stream
+pub async fn read_frame<S>(stream: &mut S, buf: &mut BytesMut) -> Result<(), KvError>
+where
+    S: AsyncRead + Unpin + Send,
+{
+    let header = stream.read_u32().await? as usize;
+    let (len, _compressed) = decode_header(header);
+    // 如果美欧那么大的内存, 就分配至少一个frame的内存, 保证它可用
+    buf.reserve(LEN_LEN + len);
+    buf.put_u32(header as _);
+    // advance_mut是unsafe的原因是, 从当前我盒子pos到pos + len
+    // 这段内存目前没有初始化, 我们就是为了reserve这段内存, 然后从stream里读取, 读取完, 它就是初始化的, 所以我们这么用是安全的
+    unsafe { buf.advance_mut(len) }
+
+    stream.read_exact(&mut buf[LEN_LEN..]).await?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Value;
+
+    struct DummyStream {
+        buf: BytesMut,
+    }
+
+    impl AsyncRead for DummyStream {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            // 看看ReadBuf需要多大的数据
+            let len = buf.capacity();
+
+            // split 出这么大的数据
+            let data = self.get_mut().buf.split_to(len);
+
+            // 拷贝给ReadBuf
+            buf.put_slice(&data);
+
+            // 完工
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
 
     #[test]
     fn command_request_encode_decode_should_work() {
@@ -134,6 +178,21 @@ mod tests {
         let res1 = CommandResponse::decode_frame(&mut buf).unwrap();
 
         assert_eq!(res, res1);
+    }
+
+    #[tokio::test]
+    async fn read_frame_should_work() {
+        let mut buf = BytesMut::new();
+        let cmd = CommandRequest::new_hdel("t1", "k1");
+        cmd.encode_frame(&mut buf).unwrap();
+        let mut stream = DummyStream { buf };
+
+        let mut data = BytesMut::new();
+        read_frame(&mut stream, &mut data).await.unwrap();
+
+        let cmd1 = CommandRequest::decode_frame(&mut data).unwrap();
+
+        assert_eq!(cmd, cmd1);
     }
 
     fn is_compressed(data: &[u8]) -> bool {

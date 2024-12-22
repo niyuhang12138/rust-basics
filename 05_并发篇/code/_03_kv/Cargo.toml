@@ -24,9 +24,12 @@ tracing = "0.1" # 日志处理
 update = "0.0.0"
 tracing-subscriber = "0.3" # 日志处理
 anyhow = "1" # 错误处理
+tokio-rustls = "0.22"
+rustls-native-certs = "0.5"
 
 [dev-dependencies]
 async-prost = "0.3" # 支持把 protobuf 封装成 TCP frame
+certify = "0.3"
 futures = "0.3" # 提供 Stream trait
 tempfile = "3.14.0"
 tokio-util = { version = "0.7.13", features = ["codec"] }

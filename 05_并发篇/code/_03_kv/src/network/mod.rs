@@ -7,6 +7,9 @@ use tracing::info;
 use crate::{CommandRequest, CommandResponse, KvError, Service};
 
 mod frame;
+mod tls;
+
+pub use tls::*;
 
 /// 处理服务器端某个accept下来的socket读写
 pub struct ProstServerStream<S> {
@@ -122,23 +125,23 @@ mod tests {
 
     #[tokio::test]
     async fn client_server_compression_should_work() -> anyhow::Result<()> {
-      let addr = start_server().await?;
+        let addr = start_server().await?;
 
-      let stream = TcpStream::connect(addr).await?;
-      let mut client = ProstClientStream::new(stream);
+        let stream = TcpStream::connect(addr).await?;
+        let mut client = ProstClientStream::new(stream);
 
-      let v: Value = Bytes::from(vec![0u8; 16384]).into();
-      let cmd = CommandRequest::new_hset("t2", "k2", v.clone());
-      let res = client.execute(cmd).await?;
+        let v: Value = Bytes::from(vec![0u8; 16384]).into();
+        let cmd = CommandRequest::new_hset("t2", "k2", v.clone());
+        let res = client.execute(cmd).await?;
 
-      assert_res_ok(res, &[Value::default()], &[]);
+        assert_res_ok(res, &[Value::default()], &[]);
 
-      let cmd = CommandRequest::new_hget("t2", "k2");
-      let res = client.execute(cmd).await?;
+        let cmd = CommandRequest::new_hget("t2", "k2");
+        let res = client.execute(cmd).await?;
 
-      assert_res_ok(res, &[v], &[]);
+        assert_res_ok(res, &[v], &[]);
 
-      Ok(())
+        Ok(())
     }
 
     async fn start_server() -> Result<SocketAddr> {

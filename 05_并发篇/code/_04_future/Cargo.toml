@@ -1,0 +1,12 @@
+[package]
+name = "_04_future"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.95"
+futures = "0.3.31"
+serde_yaml = "0.9.34"
+tokio = { version = "1.42.0", features = ["full"] }
+tokio-util = { version = "0.7.13", features = ["codec"] }
+toml = "0.8.19"

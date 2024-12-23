@@ -359,3 +359,224 @@ fn main() {
 
 现在你应该了解到在Rust下, 自引用类型带来的危害了吧
 
+所以Pin的出现, 对解决这类问题很关键, 如果你视图移动被Pin住的数据结构, 要么编译器会通过编译错误阻止你; 要么你强行使用unsafe Rust, 自己负责其安全性, 我们来看Pin后如何避免移动带来的问题:
+
+```rust
+use std::{marker::PhantomPinned, pin::Pin};
+#[derive(Debug)]
+struct SelfReference {
+    name: String,
+    // 在初始化后指向 name
+    name_ptr: *const String,
+    // PhantomPinned 占位符
+    _marker: PhantomPinned,
+}
+impl SelfReference {
+    pub fn new(name: impl Into<String>) -> Self {
+        SelfReference {
+            name: name.into(),
+            name_ptr: std::ptr::null(),
+            _marker: PhantomPinned,
+        }
+    }
+    pub fn init(self: Pin<&mut Self>) {
+        let name_ptr = &self.name as *const String;
+        // SAFETY: 这里并不会把任何数据从 &mut SelfReference 中移走
+        let this = unsafe { self.get_unchecked_mut() };
+        this.name_ptr = name_ptr;
+    }
+    pub fn print_name(self: Pin<&Self>) {
+        println!(
+            "struct {:p}: (name: {:p} name_ptr: {:p}), name: {}, name_ref: {}"
+            self,
+            &self.name,
+            self.name_ptr,
+            self.name,
+            // 在使用 ptr 是需要 unsafe
+            // SAFETY: 因为数据不会移动，所以这里 name_ptr 是安全的
+            unsafe { &*self.name_ptr },
+        );
+    }
+}
+fn main() {
+    move_creates_issue();
+}
+fn move_creates_issue() {
+    let mut data = SelfReference::new("Tyr");
+    let mut data = unsafe { Pin::new_unchecked(&mut data) };
+    SelfReference::init(data.as_mut());
+    // 不 move，一切正常
+    data.as_ref().print_name();
+    // 现在只能拿到 pinned 后的数据，所以 move 不了之前
+    move_pinned(data.as_mut());
+    println!("{:?} ({:p})", data, &data);
+    // 你无法拿回 Pin 之前的 SelfReference 结构，所以调用不了 move_it
+    // move_it(data);
+}
+fn move_pinned(data: Pin<&mut SelfReference>) {
+    println!("{:?} ({:p})", data, &data);
+}
+#[allow(dead_code)]
+fn move_it(data: SelfReference) {
+    println!("{:?} ({:p})", data, &data);
+}
+```
+
+由于数据结构被包裹在Pin内部, 所以在函数传递的时候, 变化的只是指向data的Pin:
+
+![image-20241223180720740](./assets/image-20241223180720740.png)
+
+学习了Pin, 不知道你有没有向其Unpin
+
+## 那么, Unpin是做什么的?
+
+现在我们在介绍主要的系统trait时, 曾经体积Unpin这个market trait
+
+```rust
+pub auto trait Unpin {}
+```
+
+Pin时为了让某个数据结构无法合法的移动, 而Unpin则相当于声明数据结构是可以移动的, 它的作用类似于Send / Sync, 通过类型约束来告诉编译器那些行为是合法的, 那些不是
+
+在Rust中, 绝大多数的数据结构都是可以移动的, 所以它们都自动实现了Unpin, 即便这些结构被Pin包裹, 它们依旧可以进行移动, 比如:
+
+```rust
+use std::mem;
+use std::pin::Pin;
+let mut string = "this".to_string();
+let mut pinned_string = Pin::new(&mut string);
+// We need a mutable reference to call `mem::replace`.
+// We can obtain such a reference by (implicitly) invoking `Pin::deref_mut`,
+// but that is only possible because `String` implements `Unpin`.
+mem::replace(&mut *pinned string, "other".to string());
+```
+
+当我们不希望一个数据结构被移动, 可以使用!Unpin, 在Rust里, 实现了!Unpin的除了内部结构(Future), 主要就是PhantomPinned
+
+```rust
+pub struct PhantomPinned;
+impl !Unpin for PhantomPinned {}
+```
+
+所以如果你希望你的数据结构不能被移动, 可以为其添加PhantomPinned字段来隐式声明!Unpin
+
+当数据结构满足UnPin时, 创建Pin以及使用Pin(主要是DerefMut)都可以使用安全接口, 否则需要使用unsafe接口
+
+```rust
+// 如果实现了 Unpin，可以通过安全接口创建和进行 DerefMut
+impl<P: Deref<Target: Unpin>> Pin<P> {
+    pub const fn new(pointer: P) -> Pin<P> {
+        // SAFETY: the value pointed to is `Unpin`, and so has no requirements
+        // around pinning.
+        unsafe { Pin::new_unchecked(pointer) }
+    }
+    pub const fn into_inner(pin: Pin<P>) -> P {
+        pin.pointer
+    }
+}
+impl<P: DerefMut<Target: Unpin>> DerefMut for Pin<P> {
+    fn deref_mut(&mut self) -> &mut P::Target {
+        Pin::get_mut(Pin::as_mut(self))
+    }
+}
+
+// 如果没有实现 Unpin，只能通过 unsafe 接口创建，不能使用 DerefMut
+impl<P: Deref> Pin<P> {
+    pub const unsafe fn new_unchecked(pointer: P) -> Pin<P> {
+        Pin { pointer }
+    }
+    pub const unsafe fn into_inner_unchecked(pin: Pin<P>) -> P {
+        pin.pointer
+    }
+}
+```
+
+## async产生的Future究竟是什么类型?
+
+现在我们对Future的接口有了完整的认识, 也知道async关键字的背后都发生了什么事情:
+
+```rust
+pub trait Future [
+    type Output;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output>;
+]
+```
+
+那么当你写一个async fn或者使用一个async block时, 究竟得到了一个什么类型的数据呢?
+
+```rust
+let fut = async { 42 };
+```
+
+你肯定觉得是`impl Future<Output = i32>`
+
+对但是impl Future不是一个具体的类型, 我们说过, 它相当于`T: Future`, 那么这个T究竟是什么呢?
+
+```rust
+fn main() {
+    let fut = async { 42 };
+    println!("type of fut is: {}", get_type_name(&fut));
+}
+fn get_type_name<T>(_: &T) -> &'static str {
+    std::any::type_name::<T>()
+}
+```
+
+```bash
+type of fut is: core::future::from_generator::GenFuture<xxx::main::{{closure}}
+```
+
+实现Future trait的是一个叫GenFuture的结构, 它内部有一个闭包, 
+
+我们来看GenFuture的定义(感兴趣的可以在Rust源码中搜索from_generator), 也可以看到它是一个泛型结构, 内部数据T要满足Generator trait
+
+```rust
+struct GenFuture<T: Generator<ResumeTy, Yield = ()>>(T);
+pub trait Generator<R = ()> {
+    type Yield;
+    type Return;
+    fn resume(
+        self: Pin<&mut Self>,
+        arg: R
+    ) -> GeneratorState<Self::Yield, Self::Return>;
+}
+```
+
+Generator是一个Rust nightly的一个triat, 它是这样使用的:
+
+```rust
+#![feature(generators, generator_trait)]
+use std::ops::{Generator, GeneratorState};
+use std::pin::Pin;
+fn main() {
+    let mut generator = || {
+        yield 1;
+        return "foo"
+    };
+    match Pin::new(&mut generator).resume(()) {
+        GeneratorState::Yielded(1) => {}
+        _ => panic!("unexpected return from resume"),
+    }
+    match Pin::new(&mut generator).resume(()) {
+        GeneratorState::Complete("foo") => {}
+        _ => panic!("unexpected return from resume"),
+    }
+}
+```
+
+可以看到, 如果你创建一个闭包, 里面有yield关键字, 就会得到一个Generator, 如果你在Python中使用过yield, 二者其实非常相似
+
+## 小结
+
+这一讲我们深入的探讨了Future接口各个部分Context, Pin/Unpin的含义, 以及async/await这样漂亮接口下的产生什么样子的代码
+
+![image-20241223182455364](./assets/image-20241223182455364.png)
+
+并发任务运行在Future这样的协程上, async/await是产生运行和运行并发任务的手段, async定义一个可以并发执行的Future任务, await触发这个任务并发执行, 具体来说
+
+当我们使用async关键字的时候, 它会产生一个impl Future的结果, 对于一个async block或者async fn来说, 内部的每个await都会被编译器捕捉, 并成功返回Future的poll方法的内部状态机的一个状态
+
+Rust的Future需要异步运行时来运行Future, 以tokio为例, 它的executor会从run queue中取出Future进行poll, 当poll返回Pendinig时, 这个Future会被挂起, 直到reactor得到了某个事件, 唤醒这个Future, 将其添加回run queue等待下次执行
+
+tokio一般会在每个物理线程(或者CPU core)下运行一个线程, 每个线程有自己的run queue来处理Future, 为了提供最大的吞吐量, tokio实现了work stealing scheduler, 这样当某个线程下没有可执行的Future, 它会从其他线程的run queue中偷一个执行
+

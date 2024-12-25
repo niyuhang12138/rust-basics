@@ -4,7 +4,7 @@ impl CommandService for Hget {
     fn execute(self, store: &impl super::Storage) -> super::CommandResponse {
         match store.get(&self.table, &self.key) {
             Ok(Some(v)) => v.into(),
-            Ok(None) => KvError::NotFound(self.table, self.key).into(),
+            Ok(None) => KvError::NotFound(format!("table {}, key {}", self.table, self.key)).into(),
             Err(e) => e.into(),
         }
     }
@@ -64,7 +64,7 @@ impl CommandService for Hdel {
     fn execute(self, store: &impl Storage) -> CommandResponse {
         match store.del(&self.table, &self.key) {
             Ok(Some(v)) => v.into(),
-            Ok(None) => KvError::NotFound(self.table, self.key).into(),
+            Ok(None) => KvError::NotFound(format!("table {}, key {}", self.table, self.key)).into(),
             Err(e) => e.into(),
         }
     }
@@ -117,7 +117,7 @@ mod tests {
         dispatch(cmd, &store);
         let cmd = CommandRequest::new_hget("score", "u1");
         let res = dispatch(cmd, &store);
-        assert_res_ok(res, &[10.into()], &[]);
+        assert_res_ok(&res, &[10.into()], &[]);
     }
 
     #[test]
@@ -125,7 +125,7 @@ mod tests {
         let store = MemTable::new();
         let cmd = CommandRequest::new_hget("score", "u1");
         let res = dispatch(cmd, &store);
-        assert_res_error(res, 404, "Not found");
+        assert_res_error(&res, 404, "Not found");
     }
 
     #[test]
@@ -134,7 +134,7 @@ mod tests {
         set_pair_to_store("hm", vec![("k1", "v1"), ("k2", "v2"), ("k3", "v3")], &store);
         let cmd = CommandRequest::new_hmget("hm", vec!["k1".into(), "k2".into(), "k3".into()]);
         let res = dispatch(cmd, &store);
-        assert_res_ok(res, &["v1".into(), "v2".into(), "v3".into()], &[]);
+        assert_res_ok(&res, &["v1".into(), "v2".into(), "v3".into()], &[]);
     }
 
     #[test]
@@ -143,7 +143,7 @@ mod tests {
         let cmd = CommandRequest::new_hmget("hm", vec!["k1".into(), "k2".into(), "k3".into()]);
         let res = dispatch(cmd, &store);
         assert_res_ok(
-            res,
+            &res,
             &[Value::default(), Value::default(), Value::default()],
             &[],
         );
@@ -152,6 +152,7 @@ mod tests {
     #[test]
     fn hgetall_should_work() {
         let store = MemTable::new();
+
         set_pair_to_store(
             "score",
             vec![("u1", 10), ("u2", 8), ("u3", 11), ("u1", 6)],
@@ -165,7 +166,7 @@ mod tests {
             Kvpair::new("u2", 8.into()),
             Kvpair::new("u3", 11.into()),
         ];
-        assert_res_ok(res, &[], pairs);
+        assert_res_ok(&res, &[], pairs);
     }
 
     #[test]
@@ -173,9 +174,9 @@ mod tests {
         let store = MemTable::new();
         let cmd = CommandRequest::new_hset("t1", "hello", "world".into());
         let res = dispatch(cmd.clone(), &store);
-        assert_res_ok(res, &[Value::default().into()], &[]);
+        assert_res_ok(&res, &[Value::default().into()], &[]);
         let res = dispatch(cmd, &store);
-        assert_res_ok(res, &["world".into()], &[]);
+        assert_res_ok(&res, &["world".into()], &[]);
     }
 
     #[test]
@@ -191,13 +192,13 @@ mod tests {
         );
         let res = dispatch(cmd.clone(), &store);
         assert_res_ok(
-            res,
+            &res,
             &[Value::default(), Value::default(), Value::default()],
             &[],
         );
 
         let res = dispatch(cmd, &store);
-        assert_res_ok(res, &["v1".into(), "v2".into(), "v3".into()], &[]);
+        assert_res_ok(&res, &["v1".into(), "v2".into(), "v3".into()], &[]);
     }
 
     #[test]
@@ -207,7 +208,7 @@ mod tests {
         dispatch(cmd, &store);
         let cmd = CommandRequest::new_hdel("d1", "d1");
         let res = dispatch(cmd, &store);
-        assert_res_ok(res, &["hello".into()], &[]);
+        assert_res_ok(&res, &["hello".into()], &[]);
     }
 
     #[test]
@@ -215,7 +216,7 @@ mod tests {
         let store = MemTable::new();
         let cmd = CommandRequest::new_hdel("d1", "d1");
         let res = dispatch(cmd, &store);
-        assert_res_error(res, 404, "Not found");
+        assert_res_error(&res, 404, "Not found");
     }
 
     #[test]
@@ -226,10 +227,10 @@ mod tests {
 
         let cmd = CommandRequest::new_hmdel("hm", vec!["k1".into(), "k2".into(), "k3".into()]);
         let res = dispatch(cmd.clone(), &store);
-        assert_res_ok(res, &["v1".into(), "v2".into(), "v3".into()], &[]);
+        assert_res_ok(&res, &["v1".into(), "v2".into(), "v3".into()], &[]);
         let res = dispatch(cmd, &store);
         assert_res_ok(
-            res,
+            &res,
             &[Value::default(), Value::default(), Value::default()],
             &[],
         );
@@ -242,7 +243,7 @@ mod tests {
         dispatch(cmd, &store);
         let cmd = CommandRequest::new_hexist("e1", "e1");
         let res = dispatch(cmd, &store);
-        assert_res_ok(res, &[true.into()], &[]);
+        assert_res_ok(&res, &[true.into()], &[]);
     }
 
     #[test]
@@ -250,7 +251,7 @@ mod tests {
         let store = MemTable::new();
         let cmd = CommandRequest::new_hexist("e1", "e1");
         let res = dispatch(cmd, &store);
-        assert_res_ok(res, &[false.into()], &[]);
+        assert_res_ok(&res, &[false.into()], &[]);
     }
 
     #[test]
@@ -265,7 +266,7 @@ mod tests {
         );
         let res = dispatch(cmd, &store);
         assert_res_ok(
-            res,
+            &res,
             &[true.into(), true.into(), true.into(), false.into()],
             &[],
         );

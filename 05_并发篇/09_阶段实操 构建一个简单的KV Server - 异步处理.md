@@ -16,7 +16,7 @@
 
 这个从收到处理到处理完成后发包的完整流程和系统结构, 可以看下图:
 
-![image-20241224153833699](assets/image-20241224153833699.png)
+![image-20241224153833699](D:/Users/ASUS/Documents/WeChat Files/wxid_5x2xi7n5xdxe22/FileStorage/File/2024-12/assets/image-20241224153833699.png)
 
 ## 今天做点什么?
 
@@ -440,4 +440,121 @@ pub mod utils {
 ```
 
 这样我们就给我们的Stream写个测试
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::super::utils::DummyStream;
+    use super::*;
+    use crate::CommandRequest;
+    use anyhow::Result;
+    use futures::{SinkExt, StreamExt};
+
+    #[tokio::test]
+    async fn prost_stream_should_work() -> Result<()> {
+        let buf = BytesMut::new();
+        let stream = DummyStream { buf };
+        let mut stream = ProstStream::<_, CommandRequest, CommandRequest>::new(stream);
+        let cmd: CommandRequest = CommandRequest::new_hdel("t1", "k1");
+        stream.send(cmd.clone()).await?;
+        if let Some(Ok(s)) = stream.next().await {
+            assert_eq!(s, cmd);
+        } else {
+            assert!(false)
+        }
+
+        Ok(())
+    }
+}
+```
+
+## 使用ProstStream
+
+接下来, 我们可以让ProstServerStream和ProstClientStream使用新定义的ProstStream, 你可以参考下面的对比
+
+```rust
+// 旧的接口
+// pub struct ProstServerStream<S> {
+// inner: S,
+// service: Service,
+// }
+
+pub struct ProstServerStream<S> {
+    inner: ProstStream<S, CommandRequest, CommandResponse>,
+    service: Service,
+}
+
+// 旧的接口
+// pub struct ProstClientStream<S> {
+// inner: S,
+// }
+
+pub struct ProstClientStream<S> {
+    inner: ProstStream<S, CommandResponse, CommandRequest>,
+}
+```
+
+然后删除send / recv函数, 并修改process / execute函数使其使用next方法和send方法
+
+```rust
+/// 处理服务器端的某个 accept 下来的 socket 的读写
+pub struct ProstServerStream<S> {
+    inner: ProstStream<S, CommandRequest, CommandResponse>,
+    service: Service,
+}
+/// 处理客户端 socket 的读写
+pub struct ProstClientStream<S> {
+    inner: ProstStream<S, CommandResponse, CommandRequest>,
+}
+impl<S> ProstServerStream<S>
+where
+S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    pub fn new(stream: S, service: Service) -> Self {
+        Self {
+            inner: ProstStream::new(stream),
+            service,
+        }
+    }
+    pub async fn process(mut self) -> Result<(), KvError> {
+        let stream = &mut self.inner;
+        while let Some(Ok(cmd)) = stream.next().await {
+            info!("Got a new command: {:?}", cmd);
+            let res = self.service.execute(cmd);
+            stream.send(res).await.unwrap();
+        }
+        Ok(())
+    }
+}
+impl<S> ProstClientStream<S>
+where
+S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    pub fn new(stream: S) -> Self {
+        Self {
+            inner: ProstStream::new(stream),
+        }
+    }
+    pub async fn execute(&mut self, cmd: CommandRequest) -> Result<CommandResponse, KvError> {
+        let stream = &mut self.inner;
+        stream.send(cmd).await?;
+        match stream.next().await {
+            Some(v) => v,
+            None => Err(KvError::Internal("Didn't get any response".into())),
+        }
+    }
+}
+```
+
+我们重构了ProstServerStream和ProstClientStream的代码, 使其内部使用更符合futures库里的Stream / Sink trait的用法, 整体代码改动不小, 但是内部实现的变更并不影响其他部分
+
+## 小结
+
+在实际开发中, 进行重构来改善既有代码质量是必不可少的, 之前在开发KV Server的过程中, 我们在不断的进行一些小的重构
+
+今天我们做了稍微大一些的重构, 为已有的代码提供更加符合异步IO接口的功能, 从对外的使用来说, 它并没有提供或者满足任何额外的需求, 但是从代码的质量和家督来说, 它使得我们的ProstStream可以更方便和直观地被其他接口调用, 也更容易跟整个Rust的现有生态结合
+
+你可能会好奇, 为什么可以这么自然的机型代码重构, 这是因为我们有足够的单元测试覆盖
+
+就像生物的进化一样, 好的代码是在良性的架构中不断演进出来的, 而在良性的重构实在优秀的单元测试的监管下, 使代码瞅着正确的方向迈出步伐, 在这里单元测试就是扮演者生物进化中的自然环境角色, 把重构过程中错误一一扼杀
 

@@ -27,6 +27,9 @@ anyhow = "1" # 错误处理
 tokio-rustls = "0.22"
 rustls-native-certs = "0.5"
 futures = "0.3" # 提供 Stream trait
+yamux = "0.9"
+tokio-util = { version = "0.7.13", features = ["compat"] }
+tokio-stream = { version = "0.1", features = ["sync"] } # 处理 stream
 
 [dev-dependencies]
 async-prost = "0.3" # 支持把 protobuf 封装成 TCP frame

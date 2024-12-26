@@ -1,0 +1,43 @@
+[package]
+name = "kv"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "kvs"
+path = "src/server.rs"
+
+[[bin]]
+name = "kvc"
+path = "src/client.rs"
+
+[dependencies]
+bytes = "1"                                                # 高效处理网络 buffer 的库
+dashmap = "6.1.0"                                          # 并发 HashMap
+flate2 = "1.0.35"
+http = "1.2"                                               # 我们使用 HTTP status code 所以引入这个类型库
+prost = "0.9"                                              # 处理 protobuf 的代码
+sled = "0.34.7"
+thiserror = "2.0.6"                                        # 错误定义和处理
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"                                            # 日志处理
+update = "0.0.0"
+tracing-subscriber = "0.3"                                 # 日志处理
+anyhow = "1"                                               # 错误处理
+tokio-rustls = "0.22"
+rustls-native-certs = "0.5"
+futures = "0.3"                                            # 提供 Stream trait
+yamux = "0.9"
+tokio-util = { version = "0.7.13", features = ["compat"] }
+tokio-stream = { version = "0.1", features = ["sync"] }    # 处理 stream
+serde = { version = "1.0.216", features = ["derive"] }
+toml = "0.8.19"
+
+[dev-dependencies]
+async-prost = "0.3"                                       # 支持把 protobuf 封装成 TCP frame
+certify = "0.3"
+tempfile = "3.14.0"
+tokio-util = { version = "0.7.13", features = ["codec"] }
+
+[build-dependencies]
+prost-build = "0.9" #

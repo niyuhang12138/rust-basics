@@ -6,8 +6,10 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 argon2 = "0.5.3"
+datafusion = "43.0.0"
 lazy_static = "1.5.0"
 rand_core = { version = "0.6", features = ["std"] }
 serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9.34"
 sqlx = { version = "0.8.2", features = ["runtime-tokio-rustls", "sqlite"] }
 tokio = { version = "1", features = ["full"] }

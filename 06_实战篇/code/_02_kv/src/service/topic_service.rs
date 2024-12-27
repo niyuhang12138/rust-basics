@@ -7,7 +7,7 @@ use crate::{CommandResponse, Publish, Subscribe, Topic, Unsubscribe};
 pub type StreamingResponse = Pin<Box<dyn Stream<Item = Arc<CommandResponse>> + Send>>;
 
 pub trait TopicService {
-    /// 处理Command, 返回Response
+    /// 处理 Command，返回 Response
     fn execute(self, topic: impl Topic) -> StreamingResponse;
 }
 
@@ -38,10 +38,7 @@ impl TopicService for Publish {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        assert_res_error, assert_res_ok, dispatch_stream, service::topic::Broadcaster,
-        CommandRequest,
-    };
+    use crate::{assert_res_error, assert_res_ok, dispatch_stream, Broadcaster, CommandRequest};
     use futures::StreamExt;
     use std::{convert::TryInto, time::Duration};
     use tokio::time;

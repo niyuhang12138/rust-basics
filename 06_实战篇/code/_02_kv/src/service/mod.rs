@@ -3,7 +3,7 @@ use crate::{
 };
 use futures::stream;
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, instrument};
 
 mod command_service;
 mod topic;
@@ -12,14 +12,20 @@ mod topic_service;
 pub use topic::{Broadcaster, Topic};
 pub use topic_service::{StreamingResponse, TopicService};
 
-/// 对Command的处理抽象
+/// 对 Command 的处理的抽象
 pub trait CommandService {
+    /// 处理 Command，返回 Response
     fn execute(self, store: &impl Storage) -> CommandResponse;
 }
 
-/// 事件通知(不可变事件)
+/// 事件通知（不可变事件）
 pub trait Notify<Arg> {
     fn notify(&self, arg: &Arg);
+}
+
+/// 事件通知（可变事件）
+pub trait NotifyMut<Arg> {
+    fn notify(&self, arg: &mut Arg);
 }
 
 impl<Arg> Notify<Arg> for Vec<fn(&Arg)> {
@@ -31,12 +37,8 @@ impl<Arg> Notify<Arg> for Vec<fn(&Arg)> {
     }
 }
 
-/// 事件通知(可变事件)
-pub trait NotifyMut<Arg> {
-    fn notify(&self, arg: &mut Arg);
-}
-
 impl<Arg> NotifyMut<Arg> for Vec<fn(&mut Arg)> {
+    #[inline]
     fn notify(&self, arg: &mut Arg) {
         for f in self {
             f(arg)
@@ -44,31 +46,10 @@ impl<Arg> NotifyMut<Arg> for Vec<fn(&mut Arg)> {
     }
 }
 
-/// Service数据结构
+/// Service 数据结构
 pub struct Service<Store = MemTable> {
-    pub inner: Arc<ServiceInner<Store>>,
-    pub broadcaster: Arc<Broadcaster>,
-}
-
-impl<Store: Storage> Service<Store> {
-    pub fn execute(&self, cmd: CommandRequest) -> StreamingResponse {
-        debug!("Got request: {cmd:?}");
-        self.inner.on_received.notify(&cmd);
-        let mut res = dispatch(cmd.clone(), &self.inner.store);
-
-        if res == CommandResponse::default() {
-            dispatch_stream(cmd, Arc::clone(&self.broadcaster))
-        } else {
-            debug!("Executed response: {res:?}");
-            self.inner.on_executed.notify(&res);
-            self.inner.on_before_send.notify(&mut res);
-            if !self.inner.on_before_send.is_empty() {
-                debug!("Modified response: {:?}", res);
-            }
-
-            Box::pin(stream::once(async { Arc::new(res) }))
-        }
-    }
+    inner: Arc<ServiceInner<Store>>,
+    broadcaster: Arc<Broadcaster>,
 }
 
 impl<Store> Clone for Service<Store> {
@@ -80,16 +61,7 @@ impl<Store> Clone for Service<Store> {
     }
 }
 
-impl<Store: Storage> From<ServiceInner<Store>> for Service<Store> {
-    fn from(value: ServiceInner<Store>) -> Self {
-        Self {
-            inner: Arc::new(value),
-            broadcaster: Default::default(),
-        }
-    }
-}
-
-/// Serviced的内部数据结构
+/// Service 内部数据结构
 pub struct ServiceInner<Store> {
     store: Store,
     on_received: Vec<fn(&CommandRequest)>,
@@ -130,54 +102,85 @@ impl<Store: Storage> ServiceInner<Store> {
     }
 }
 
-/// Request中得到Response
+impl<Store: Storage> From<ServiceInner<Store>> for Service<Store> {
+    fn from(inner: ServiceInner<Store>) -> Self {
+        Self {
+            inner: Arc::new(inner),
+            broadcaster: Default::default(),
+        }
+    }
+}
+
+impl<Store: Storage> Service<Store> {
+    #[instrument(name = "service_execute", skip_all)]
+    pub fn execute(&self, cmd: CommandRequest) -> StreamingResponse {
+        debug!("Got request: {:?}", cmd);
+        self.inner.on_received.notify(&cmd);
+        let mut res = dispatch(cmd.clone(), &self.inner.store);
+
+        if res == CommandResponse::default() {
+            dispatch_stream(cmd, Arc::clone(&self.broadcaster))
+        } else {
+            debug!("Executed response: {:?}", res);
+            self.inner.on_executed.notify(&res);
+            self.inner.on_before_send.notify(&mut res);
+            if !self.inner.on_before_send.is_empty() {
+                debug!("Modified response: {:?}", res);
+            }
+
+            Box::pin(stream::once(async { Arc::new(res) }))
+        }
+    }
+}
+
+/// 从 Request 中得到 Response，目前处理所有 HGET/HSET/HDEL/HEXIST
 pub fn dispatch(cmd: CommandRequest, store: &impl Storage) -> CommandResponse {
     match cmd.request_data {
         Some(RequestData::Hget(param)) => param.execute(store),
-        Some(RequestData::Hmget(param)) => param.execute(store),
         Some(RequestData::Hgetall(param)) => param.execute(store),
+        Some(RequestData::Hmget(param)) => param.execute(store),
         Some(RequestData::Hset(param)) => param.execute(store),
         Some(RequestData::Hmset(param)) => param.execute(store),
         Some(RequestData::Hdel(param)) => param.execute(store),
         Some(RequestData::Hmdel(param)) => param.execute(store),
         Some(RequestData::Hexist(param)) => param.execute(store),
         Some(RequestData::Hmexist(param)) => param.execute(store),
-        _ => KvError::Internal("Not implemented".into()).into(),
+        None => KvError::InvalidCommand("Request has no data".into()).into(),
+        // 处理不了的返回一个啥都不包括的 Response，这样后续可以用 dispatch_stream 处理
+        _ => CommandResponse::default(),
     }
 }
 
-/// 从Request中得到Response, 目前处理所有的PUBLISH/SUBSCRIBE/UNSUBSCRIBE
+/// 从 Request 中得到 Response，目前处理所有 PUBLISH/SUBSCRIBE/UNSUBSCRIBE
 pub fn dispatch_stream(cmd: CommandRequest, topic: impl Topic) -> StreamingResponse {
     match cmd.request_data {
         Some(RequestData::Publish(param)) => param.execute(topic),
         Some(RequestData::Subscribe(param)) => param.execute(topic),
         Some(RequestData::Unsubscribe(param)) => param.execute(topic),
-        // 如果走到这里, 就是代码逻辑有问题, 直接crash出来
+        // 如果走到这里，就是代码逻辑的问题，直接 crash 出来
         _ => unreachable!(),
     }
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use http::StatusCode;
     use tokio_stream::StreamExt;
     use tracing::info;
 
-    use crate::Value;
-
     use super::*;
+    use crate::{MemTable, Value};
 
     #[tokio::test]
     async fn service_should_works() {
-        // 我们需要一个service结构只要包含Storage
-        // let service = Service::new(MemTable::default());
+        // 我们需要一个 service 结构至少包含 Storage
         let service: Service = ServiceInner::new(MemTable::default()).into();
 
-        // service可以运行在多线程的环境下, 它的clone应该是轻量的
+        // service 可以运行在多线程环境下，它的 clone 应该是轻量级的
         let cloned = service.clone();
 
-        // 创建一个线程, 在table t1中写入k1, v1
-        let handle = tokio::spawn(async move {
+        // 创建一个线程，在 table t1 中写入 k1, v1
+        tokio::spawn(async move {
             let mut res = cloned.execute(CommandRequest::new_hset("t1", "k1", "v1".into()));
             let data = res.next().await.unwrap();
             assert_res_ok(&data, &[Value::default()], &[]);
@@ -185,7 +188,7 @@ mod test {
         .await
         .unwrap();
 
-        // 在档期你咸亨下读取table t1的k1, 应该返回v1
+        // 在当前线程下读取 table t1 的 k1，应该返回 v1
         let mut res = service.execute(CommandRequest::new_hget("t1", "k1"));
         let data = res.next().await.unwrap();
         assert_res_ok(&data, &["v1".into()], &[]);
@@ -225,9 +228,8 @@ mod test {
 #[cfg(test)]
 use crate::{Kvpair, Value};
 
-#[cfg(test)]
 // 测试成功返回的结果
-
+#[cfg(test)]
 pub fn assert_res_ok(res: &CommandResponse, values: &[Value], pairs: &[Kvpair]) {
     let mut sorted_pairs = res.pairs.clone();
     sorted_pairs.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -238,6 +240,7 @@ pub fn assert_res_ok(res: &CommandResponse, values: &[Value], pairs: &[Kvpair]) 
 }
 
 // 测试失败返回的结果
+#[cfg(test)]
 pub fn assert_res_error(res: &CommandResponse, code: u32, msg: &str) {
     assert_eq!(res.status, code);
     assert!(res.message.contains(msg));

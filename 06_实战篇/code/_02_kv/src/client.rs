@@ -77,7 +77,6 @@
 // }
 
 use anyhow::Result;
-use kv::{start_client_with_config, ClientConfig};
 
 #[tokio::main]
 async fn main() -> Result<()> {

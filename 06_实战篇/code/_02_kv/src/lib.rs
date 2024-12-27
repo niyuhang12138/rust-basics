@@ -5,18 +5,23 @@ mod pb;
 mod service;
 mod storage;
 
+use std::time::Duration;
+
 pub use config::*;
 pub use error::*;
 pub use network::*;
-pub use pb::*;
+pub use pb::abi::*;
 pub use service::*;
 pub use storage::*;
 
 use anyhow::Result;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    time,
+};
 use tokio_rustls::client;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
-use tracing::{info, instrument, span};
+use tracing::info;
 
 /// 通过配置创建KV服务器
 pub async fn start_server_with_config(config: &ServerConfig) -> Result<()> {
@@ -67,6 +72,8 @@ async fn start_tls_server<Store: Storage>(
                 let svc1 = svc.clone();
                 async move {
                     let stream = ProstServerStream::new(stream.compat(), svc1.clone());
+                    // 延迟100ms处理
+                    // time::sleep(Duration::from_millis(100)).await;
                     stream.process().await.unwrap();
                     Ok(())
                 }

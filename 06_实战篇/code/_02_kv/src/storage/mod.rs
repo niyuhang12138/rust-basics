@@ -6,30 +6,25 @@ pub use sleddb::SledDb;
 
 use crate::{KvError, Kvpair, Value};
 
-/// 对存储的抽象. 我们不关心数据存在哪里, 但需要定义外界如何和存储打交道
+/// 对存储的抽象，我们不关心数据存在哪儿，但需要定义外界如何和存储打交道
 pub trait Storage: Send + Sync + 'static {
-    /// 从HashTable里获取一个key的value
+    /// 从一个 HashTable 里获取一个 key 的 value
     fn get(&self, table: &str, key: &str) -> Result<Option<Value>, KvError>;
-
-    /// 从一个HashTable中设置一个key的value, 返回旧的value
+    /// 从一个 HashTable 里设置一个 key 的 value，返回旧的 value
     fn set(&self, table: &str, key: String, value: Value) -> Result<Option<Value>, KvError>;
-
-    /// 查看HashTable中是否存在key
+    /// 查看 HashTable 中是否有 key
     fn contains(&self, table: &str, key: &str) -> Result<bool, KvError>;
-
-    /// 从HashTable中删除一个key
+    /// 从 HashTable 中删除一个 key
     fn del(&self, table: &str, key: &str) -> Result<Option<Value>, KvError>;
-
-    /// 遍历HashTable, 返回所有的kv pair
+    /// 遍历 HashTable，返回所有 kv pair（这个接口不好）
     fn get_all(&self, table: &str) -> Result<Vec<Kvpair>, KvError>;
-
-    /// 遍历HashTable, 返回Kvpair的Iterator
+    /// 遍历 HashTable，返回 kv pair 的 Iterator
     fn get_iter(&self, table: &str) -> Result<Box<dyn Iterator<Item = Kvpair>>, KvError>;
 }
 
-/// 提供Storage Iterator, 这样trait的实现着只需要
-/// 把他们的Iterator提供给StorageIter, 然后他们保证
-/// next出来的类型实现了Into<Kvpair>即可
+/// 提供 Storage iterator，这样 trait 的实现者只需要
+/// 把它们的 iterator 提供给 StorageIter，然后它们保证
+/// next() 传出的类型实现了 Into<Kvpair> 即可
 pub struct StorageIter<T> {
     data: T,
 }
@@ -54,7 +49,6 @@ where
 
 #[cfg(test)]
 mod tests {
-
     use tempfile::tempdir;
 
     use super::*;
@@ -62,11 +56,11 @@ mod tests {
     #[test]
     fn memtable_basic_interface_should_work() {
         let store = MemTable::new();
-        test_basic_interface(store);
+        test_basi_interface(store);
     }
 
     #[test]
-    fn memetable_get_all_should_work() {
+    fn memtable_get_all_should_work() {
         let store = MemTable::new();
         test_get_all(store);
     }
@@ -81,7 +75,14 @@ mod tests {
     fn sleddb_basic_interface_should_work() {
         let dir = tempdir().unwrap();
         let store = SledDb::new(dir);
-        test_get_all(store)
+        test_basi_interface(store);
+    }
+
+    #[test]
+    fn sleddb_get_all_should_work() {
+        let dir = tempdir().unwrap();
+        let store = SledDb::new(dir);
+        test_get_all(store);
     }
 
     #[test]
@@ -91,21 +92,7 @@ mod tests {
         test_get_iter(store);
     }
 
-    // #[test]
-    // fn rocksdb_basic_interface_should_work() {
-    //     let dir = tempdir().unwrap();
-    //     let store = RocksDb::new(dir);
-    //     test_get_all(store);
-    // }
-
-    // #[test]
-    // fn rocks_iter_should_work() {
-    //     let dir = tempdir().unwrap();
-    //     let store = RocksDb::new(dir);
-    //     test_get_iter(store);
-    // }
-
-    fn test_basic_interface(store: impl Storage) {
+    fn test_basi_interface(store: impl Storage) {
         // 第一次 set 会创建 table，插入 key 并返回 None（之前没值）
         let v = store.set("t1", "hello".into(), "world".into());
         assert!(v.unwrap().is_none());
@@ -139,7 +126,6 @@ mod tests {
         store.set("t2", "k1".into(), "v1".into()).unwrap();
         store.set("t2", "k2".into(), "v2".into()).unwrap();
         let mut data = store.get_all("t2").unwrap();
-
         data.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert_eq!(
             data,
@@ -153,8 +139,7 @@ mod tests {
     fn test_get_iter(store: impl Storage) {
         store.set("t2", "k1".into(), "v1".into()).unwrap();
         store.set("t2", "k2".into(), "v2".into()).unwrap();
-        let mut data = store.get_iter("t2").unwrap().collect::<Vec<_>>();
-
+        let mut data: Vec<_> = store.get_iter("t2").unwrap().collect();
         data.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert_eq!(
             data,

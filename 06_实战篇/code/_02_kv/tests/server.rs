@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use kv::{
-    start_client_with_config, start_server_with_config, ClientConfig, CommandRequest,
-    ProstClientStream, ServerConfig, StorageConfig,
+    start_client_with_config, start_server_with_config, ClientConfig, CommandRequest, ServerConfig,
+    StorageConfig,
 };
 use tokio::time;
 
@@ -24,11 +24,18 @@ async fn yamux_server_client_full_tests() -> Result<()> {
     config.general.addr = addr.into();
 
     let mut ctrl = start_client_with_config(&config).await.unwrap();
-    let stream = ctrl.open_stream().await.unwrap();
-    let mut client = ProstClientStream::new(stream);
+    let mut stream = ctrl.open_stream().await.unwrap();
 
     // 生成一个HSET命令
-    // let cmd = CommandRequest::new_hset(table, key, value)
+    let cmd = CommandRequest::new_hset("t1", "k1", "v1".into());
+    stream.execute_unary(&cmd).await?;
+
+    // 生成一个HGET命令
+    let cmd = CommandRequest::new_hget("t1", "k1");
+    let data = stream.execute_unary(&cmd).await?;
+
+    assert_eq!(data.status, 200);
+    assert_eq!(data.values, &["v1".into()]);
 
     Ok(())
 }
